@@ -1,0 +1,6 @@
+{
+  "name": "Last Donkey",
+  "description": "Traditional 2 to 6 player trick-taking shedding card game. Clear your hand and avoid becoming the Last Donkey.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
