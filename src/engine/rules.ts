@@ -1,7 +1,8 @@
-import { ACE_OF_SPADES_ID, createDeck, dealCards, shuffleDeck } from './deck';
-import { chooseRandomLegalCard } from './bot';
+import { ACE_OF_SPADES_ID, createDeck, dealCards, shuffleDeck } from './deck.ts';
+import { chooseRandomLegalCard } from './bot.ts';
 import type {
   Card,
+  DifficultyMode,
   FailedTrickOutcome,
   GameState,
   MissedTurnResponse,
@@ -11,7 +12,7 @@ import type {
   RedistributionEvent,
   SuccessfulTrickOutcome,
   TrickPlay,
-} from './types';
+} from './types.ts';
 
 const DEFAULT_AVATAR_COLORS = [
   '#E59A00', // Marigold Gold
@@ -25,6 +26,7 @@ const DEFAULT_AVATAR_COLORS = [
 export interface CreateGameOptions {
   rng?: () => number;
   customHands?: Card[][];
+  difficulty?: DifficultyMode;
 }
 
 export interface PlayCardOptions {
@@ -125,6 +127,7 @@ export function createInitialGameState(
 
   return {
     phase: 'playing',
+    difficulty: options.difficulty ?? 'easy',
     players,
     currentTrick: {
       trickNumber: 1,
@@ -142,6 +145,7 @@ export function createInitialGameState(
     donkeyPlayerId: null,
     endReason: null,
     lastRedistribution: null,
+    redistributionHistory: [],
   };
 }
 
@@ -612,7 +616,7 @@ export function removePlayerAndRedistribute(
     }
   }
 
-  const cardsToDistribute = shuffleDeck(target.hand, rng);
+  const cardsToDistribute = target.hand.length > 0 ? shuffleDeck(target.hand, rng) : [];
   const additions = new Map<string, Card[]>();
   const recipientCounts: Record<string, number> = {};
   for (const rid of recipientIds) {
@@ -653,7 +657,12 @@ export function removePlayerAndRedistribute(
     reason,
     cardsDistributedCount: cardsToDistribute.length,
     recipientCounts,
+    afterTrickCount: state.trickHistory.length,
   };
+  const nextRedistributionHistory: RedistributionEvent[] = [
+    ...(state.redistributionHistory ?? []),
+    redistribution,
+  ];
 
   const remainingActive = getActivePlayers(updatedPlayers);
 
@@ -676,6 +685,7 @@ export function removePlayerAndRedistribute(
           ? `${target.name} left the game. ${donkey.name} is the last player remaining with cards.`
           : 'No active players remain.',
         lastRedistribution: redistribution,
+        redistributionHistory: nextRedistributionHistory,
       },
     };
   }
@@ -697,6 +707,7 @@ export function removePlayerAndRedistribute(
           nextLeaderId,
         },
         lastRedistribution: redistribution,
+        redistributionHistory: nextRedistributionHistory,
       },
     };
   }
@@ -732,6 +743,7 @@ export function removePlayerAndRedistribute(
         currentTurnPlayerId: nextLeaderId,
         isFirstTurnOfGame,
         lastRedistribution: redistribution,
+        redistributionHistory: nextRedistributionHistory,
       },
     };
   }
@@ -757,6 +769,7 @@ export function removePlayerAndRedistribute(
           expectedPlayerIds: updatedExpected,
         },
         lastRedistribution: redistribution,
+        redistributionHistory: nextRedistributionHistory,
       },
     };
   }
@@ -775,6 +788,7 @@ export function removePlayerAndRedistribute(
       },
       currentTurnPlayerId: nextTurnPlayerId,
       lastRedistribution: redistribution,
+      redistributionHistory: nextRedistributionHistory,
     },
   };
 }

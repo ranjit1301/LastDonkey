@@ -1,5 +1,5 @@
-import type { Card, GameState, PlayerType } from '../engine';
-import type { TurnTimerSeconds } from '../lib/settings';
+import type { Card, DifficultyMode, GameState, PlayerType } from '../engine/index.ts';
+import type { TurnTimerSeconds } from '../lib/settings.ts';
 
 export type RoomVisibility = 'private' | 'public';
 export type RoomStatus = 'waiting' | 'playing' | 'finished' | 'closed';
@@ -41,10 +41,15 @@ export interface RoomNotification {
 export interface PublicRoomSummary {
   roomCode: string;
   tableName: string;
+  hostName: string;
   capacity: number;
   playerCount: number;
+  availableSeats: number;
   isFull: boolean;
+  joinable: boolean;
   status: RoomStatus;
+  difficulty: DifficultyMode;
+  turnTimerSeconds: TurnTimerSeconds;
   aiHostActive: boolean;
   vacancyExpiresAt: number | null;
 }
@@ -78,6 +83,7 @@ export interface ClientRoomState {
   visibility: RoomVisibility;
   capacity: number;
   status: RoomStatus;
+  difficulty: DifficultyMode;
   inviteToken: string | null; // Only sent to players in the room (for sharing)
   hostPlayerId: string | null;
   aiHostActive: boolean;
@@ -103,6 +109,7 @@ export type ClientMessage =
       capacity: number;
       visibility: RoomVisibility;
       turnTimerSeconds?: TurnTimerSeconds;
+      difficulty?: DifficultyMode;
     }
   | {
       type: 'join_room';
@@ -114,6 +121,7 @@ export type ClientMessage =
       type: 'reconnect';
       roomCode: string;
       sessionToken: string;
+      rejectIfActive?: boolean;
     }
   | { type: 'leave_room' }
   | { type: 'add_bot' }
@@ -129,7 +137,10 @@ export type ClientMessage =
   | { type: 'update_turn_timer'; turnTimerSeconds: TurnTimerSeconds }
   | { type: 'rematch_request' }
   | { type: 'rematch_respond'; accept: boolean }
-  | { type: 'rematch_start' };
+  | { type: 'rematch_start' }
+  | { type: 'ping' };
+
+export type LeaveRoomReason = 'left' | 'voluntary_exit' | 'finished_exit' | 'kicked';
 
 // Server -> Client WebSocket Messages
 export type ServerMessage =
@@ -153,7 +164,21 @@ export type ServerMessage =
       code?: string;
     }
   | {
+      type: 'left_room';
+      roomCode: string;
+      reason: LeaveRoomReason;
+      message?: string;
+    }
+  | {
       type: 'room_closed';
       roomCode: string;
       reason: string;
+    }
+  | {
+      type: 'session_superseded';
+      roomCode: string;
+      message: string;
+    }
+  | {
+      type: 'pong';
     };

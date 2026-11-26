@@ -93,7 +93,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       disabled={onClick ? !playable : undefined}
-      aria-label={`${rankLabel} of ${SUIT_NAMES[card.suit]}${playable ? ', playable' : ''}`}
+      aria-label={`${rankLabel} of ${SUIT_NAMES[card.suit]}${selected ? ', selected' : ''}${playable ? ', playable' : ''}`}
       aria-pressed={onClick ? selected : undefined}
       className={[
         'relative select-none card-ivory border border-[#DFD6C3] flex flex-col justify-between transition-transform duration-150 ease-out will-change-transform',

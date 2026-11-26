@@ -75,13 +75,18 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 Auto-plays a random legal card when time reaches 0.
               </p>
             </div>
-            <div className="inline-flex flex-wrap gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto">
+            <div
+              role="group"
+              aria-label="Player turn timer"
+              className="inline-flex flex-wrap gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto"
+            >
               {([0, 10, 15, 20, 30] as TurnTimerSeconds[]).map((sec) => (
                 <button
                   key={sec}
                   type="button"
+                  aria-pressed={settings.turnTimerSeconds === sec}
                   onClick={() => patch({ turnTimerSeconds: sec })}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums cursor-pointer transition-colors ${
+                  className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums cursor-pointer transition-colors ${
                     settings.turnTimerSeconds === sec
                       ? 'bg-[#D95732] text-white'
                       : 'text-[#4E4136] hover:text-[#261E18]'
@@ -103,7 +108,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 Select &amp; Play prevents accidental card taps on mobile.
               </p>
             </div>
-            <div className="inline-flex gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto">
+            <div
+              role="group"
+              aria-label="Card selection control"
+              className="inline-flex flex-wrap gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto"
+            >
               {(
                 [
                   { id: 'confirm', label: 'Select & Play' },
@@ -113,8 +122,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 <button
                   key={opt.id}
                   type="button"
+                  aria-pressed={settings.playTapMode === opt.id}
                   onClick={() => patch({ playTapMode: opt.id })}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
+                  className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
                     settings.playTapMode === opt.id
                       ? 'bg-[#365B40] text-white'
                       : 'text-[#4E4136] hover:text-[#261E18]'
@@ -134,11 +144,16 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 Sort cards within each suit from Ace to 2, or 2 to Ace.
               </p>
             </div>
-            <div className="inline-flex gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto">
+            <div
+              role="group"
+              aria-label="Hand sort order"
+              className="inline-flex gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto"
+            >
               <button
                 type="button"
+                aria-pressed={settings.sortOrder === 'desc'}
                 onClick={() => patch({ sortOrder: 'desc' })}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
                   settings.sortOrder === 'desc'
                     ? 'bg-[#365B40] text-white'
                     : 'text-[#4E4136] hover:text-[#261E18]'
@@ -148,8 +163,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
               </button>
               <button
                 type="button"
+                aria-pressed={settings.sortOrder === 'asc'}
                 onClick={() => patch({ sortOrder: 'asc' })}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
                   settings.sortOrder === 'asc'
                     ? 'bg-[#365B40] text-white'
                     : 'text-[#4E4136] hover:text-[#261E18]'
@@ -168,7 +184,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 Bot turn speed and trick banner timing in local games.
               </p>
             </div>
-            <div className="inline-flex gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto">
+            <div
+              role="group"
+              aria-label="Practice game pace"
+              className="inline-flex flex-wrap gap-1 p-1 rounded-xl bg-[#E8DDCC] self-start sm:self-auto"
+            >
               {(
                 [
                   { id: 'relaxed', label: 'Relaxed' },
@@ -179,8 +199,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 <button
                   key={opt.id}
                   type="button"
+                  aria-pressed={settings.gameSpeed === opt.id}
                   onClick={() => patch({ gameSpeed: opt.id })}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
+                  className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors whitespace-nowrap ${
                     settings.gameSpeed === opt.id
                       ? 'bg-[#365B40] text-white'
                       : 'text-[#4E4136] hover:text-[#261E18]'

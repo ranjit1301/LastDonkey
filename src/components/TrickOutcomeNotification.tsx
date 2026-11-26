@@ -2,24 +2,28 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { AlertTriangle, CheckCircle2, Sparkles } from 'lucide-react';
 import { formatCard, SUIT_SYMBOLS, type TrickOutcome } from '../engine';
+import { getTrickBannerInteraction } from '../lib/turnTimer';
 
 interface TrickOutcomeNotificationProps {
   outcome: TrickOutcome;
   players: Array<{ id: string; name: string }>;
   autoAdvance: boolean;
   durationMs: number;
-  onContinue: () => void;
+  isServerControlled?: boolean;
+  onContinue?: () => void;
 }
 
 /**
  * Compact, non-blocking trick outcome banner floating cleanly at top of the table.
- * Auto-advances smoothly with a progress bar (or offers Continue in Manual mode).
+ * In online games, progression is strictly server-authoritative with no misleading tap affordances.
+ * In local games, auto-advances smoothly with a progress bar (or offers Continue in Manual mode).
  */
 export const TrickOutcomeNotification: React.FC<TrickOutcomeNotificationProps> = ({
   outcome,
   players,
   autoAdvance,
   durationMs,
+  isServerControlled = false,
   onContinue,
 }) => {
   const getName = (id: string | null) => {
@@ -30,6 +34,7 @@ export const TrickOutcomeNotification: React.FC<TrickOutcomeNotificationProps> =
   const isSuccess = outcome.type === 'success';
   const nextLeaderName = getName(outcome.nextLeaderId);
   const finishedNames = outcome.newlyFinishedIds.map((id) => getName(id));
+  const interaction = getTrickBannerInteraction({ isServerControlled, autoAdvance });
 
   return (
     <div
@@ -42,10 +47,10 @@ export const TrickOutcomeNotification: React.FC<TrickOutcomeNotificationProps> =
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -10, scale: 0.97 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        onClick={autoAdvance ? onContinue : undefined}
-        title={autoAdvance ? 'Tap to continue immediately' : undefined}
+        onClick={interaction.allowClickToAdvance ? onContinue : undefined}
+        title={interaction.tooltip}
         className={`pointer-events-auto relative overflow-hidden w-full max-w-lg rounded-2xl px-4 py-3.5 sm:px-5 sm:py-4 shadow-[0_18px_40px_-10px_rgba(0,0,0,0.65)] border ${
-          autoAdvance ? 'cursor-pointer' : ''
+          interaction.cursorClass
         } ${
           isSuccess
             ? 'bg-[#123820]/96 border-[#F0B429]/65'
@@ -115,7 +120,7 @@ export const TrickOutcomeNotification: React.FC<TrickOutcomeNotificationProps> =
             )}
           </div>
 
-          {!autoAdvance && (
+          {interaction.showManualContinueButton && onContinue && (
             <button
               type="button"
               onClick={onContinue}
@@ -130,7 +135,7 @@ export const TrickOutcomeNotification: React.FC<TrickOutcomeNotificationProps> =
           )}
         </div>
 
-        {autoAdvance && (
+        {interaction.showProgressBar && (
           <div className="absolute inset-x-0 bottom-0 h-[3px] bg-white/10">
             <motion.div
               key={`${outcome.trickNumber}-${outcome.type}`}

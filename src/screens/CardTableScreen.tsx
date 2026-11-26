@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowUp,
@@ -6,25 +6,47 @@ import {
   Bot,
   Eye,
   EyeOff,
+  Flag,
+  Layers,
   LogOut,
   Settings,
   Trash2,
   Volume2,
   VolumeX,
-  WifiOff,
 } from 'lucide-react';
 import {
   ACE_OF_SPADES_ID,
+  canFinishPracticeSessionEarly,
+  DIFFICULTY_META,
   formatCard,
+  getMediumStrategicHint,
   isRedSuit,
   sortHand,
   SUIT_NAMES,
   SUIT_SYMBOLS,
   type Card,
+  type DifficultyMode,
   type GameState,
 } from '../engine';
+import { ConnectionBanner } from '../components/ConnectionBanner';
+import { DiscardedCardTracker } from '../components/DiscardedCardTracker';
+import { MediumAssistBar } from '../components/MediumAssistBar';
 import { PlayingCard } from '../components/PlayingCard';
 import { TrickOutcomeNotification } from '../components/TrickOutcomeNotification';
+import {
+  resolvePassAndPlayPerspectivePlayer,
+  shouldHidePassAndPlayHand,
+  shouldShowPassAndPlayPrivacyCurtain,
+} from '../lib/localExit';
+import {
+  buildTurnKey,
+  EMPTY_LOCAL_TURN_TIMER,
+  getRemainingSeconds,
+  isTimerExpired,
+  syncLocalTurnTimer,
+  type LocalTurnTimerState,
+} from '../lib/turnTimer';
+import type { ConnectionStatusInfo } from '../lib/multiplayerClient';
 import type { AppSettings } from '../lib/settings';
 import type { ClientGameStateView, ClientPlayerView, ClientRoomState } from '../server/roomTypes';
 
@@ -77,16 +99,21 @@ interface CardTableScreenProps {
   roomCode: string;
   isOnline: boolean;
   onlineRoom?: ClientRoomState | null;
-  connectionStatus?: 'connected' | 'reconnecting' | 'disconnected';
+  connectionInfo?: ConnectionStatusInfo;
+  onRetryReconnect?: () => void;
+  onReturnHome?: () => void;
   trickNotificationDurationMs: number;
   onPlayCard: (playerId: string, cardId: string) => void;
   onLocalMissedTurn?: (playerId: string) => void;
+  onLocalTurnDeadlineChange?: (deadlineAt: number | null) => void;
   onContinueTrick: () => void;
   onToggleSound: () => void;
   onToggleOpenHands: () => void;
   onOpenRules: () => void;
   onOpenSettings: () => void;
-  onVoluntaryExit: () => void;
+  onVoluntaryExit: (exitingPlayerId?: string) => void;
+  isPracticeVsBots?: boolean;
+  onFinishPracticeEarly?: () => void;
   onOnlineRespondHostTransfer?: (accept: boolean) => void;
 }
 
@@ -96,24 +123,35 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
   roomCode,
   isOnline,
   onlineRoom,
-  connectionStatus = 'connected',
+  connectionInfo = { status: 'connected', attempt: 0 },
+  onRetryReconnect,
+  onReturnHome,
   trickNotificationDurationMs,
   onPlayCard,
   onLocalMissedTurn,
+  onLocalTurnDeadlineChange,
   onContinueTrick,
   onToggleSound,
   onToggleOpenHands,
   onOpenRules,
   onOpenSettings,
   onVoluntaryExit,
+  isPracticeVsBots = false,
+  onFinishPracticeEarly,
   onOnlineRespondHostTransfer,
 }) => {
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [revealedPlayerId, setRevealedPlayerId] = useState<string | null>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [localSecondsLeft, setLocalSecondsLeft] = useState<number>(settings.turnTimerSeconds);
+  const [confirmFinishPractice, setConfirmFinishPractice] = useState(false);
+  const [discardDrawerOpen, setDiscardDrawerOpen] = useState(false);
+  const [ruleNotice, setRuleNotice] = useState<string | null>(null);
+  const [localTimerState, setLocalTimerState] =
+    useState<LocalTurnTimerState>(EMPTY_LOCAL_TURN_TIMER);
+  const firedTimeoutTurnKeyRef = useRef<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  const difficulty: DifficultyMode = gameState.difficulty ?? 'easy';
   const players = useMemo(() => normalizePlayers(gameState), [gameState]);
   const humanPlayers = useMemo(() => players.filter((p) => p.type === 'human'), [players]);
   const isPassAndPlay = !isOnline && humanPlayers.length > 1;
@@ -129,22 +167,45 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
       return players.find((p) => p.id === onlineRoom.yourPlayerId) ?? players[0];
     }
     if (isPassAndPlay) {
-      if (activeTurnPlayer && activeTurnPlayer.type === 'human') return activeTurnPlayer;
-      return humanPlayers.find((p) => !p.finished && !p.removed) ?? humanPlayers[0];
+      return resolvePassAndPlayPerspectivePlayer({
+        phase: gameState.phase,
+        activeTurnPlayer,
+        nextLeaderId: gameState.lastOutcome?.nextLeaderId ?? null,
+        players,
+        revealedPlayerId,
+      });
     }
     return humanPlayers[0] ?? players[0];
-  }, [isOnline, onlineRoom, isPassAndPlay, activeTurnPlayer, humanPlayers, players]);
+  }, [
+    isOnline,
+    onlineRoom,
+    isPassAndPlay,
+    gameState.phase,
+    gameState.lastOutcome?.nextLeaderId,
+    activeTurnPlayer,
+    players,
+    revealedPlayerId,
+    humanPlayers,
+  ]);
 
-  // Clear selection whenever turn or trick changes
+  // Clear selection and any inline rule reminder whenever turn or trick changes
   useEffect(() => {
     setSelectedCardId(null);
+    setRuleNotice(null);
   }, [gameState.currentTurnPlayerId, gameState.currentTrick.trickNumber, gameState.phase]);
 
-  // Pass-and-play privacy curtain
+  // Pass-and-play privacy curtain & reset whenever revealed player exits/finishes or another human is up
   useEffect(() => {
     if (!isPassAndPlay || settings.openHandsTesting) {
       setRevealedPlayerId(null);
       return;
+    }
+    if (revealedPlayerId) {
+      const revealedSeat = players.find((p) => p.id === revealedPlayerId);
+      if (!revealedSeat || revealedSeat.removed || revealedSeat.finished) {
+        setRevealedPlayerId(null);
+        return;
+      }
     }
     if (activeTurnPlayer?.type === 'human' && revealedPlayerId !== activeTurnPlayer.id) {
       setRevealedPlayerId(null);
@@ -153,16 +214,27 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     activeTurnPlayer?.id,
     activeTurnPlayer?.type,
     isPassAndPlay,
+    players,
     settings.openHandsTesting,
     revealedPlayerId,
   ]);
 
-  const needsPrivacyCurtain =
-    isPassAndPlay &&
-    !settings.openHandsTesting &&
-    gameState.phase === 'playing' &&
-    activeTurnPlayer?.type === 'human' &&
-    revealedPlayerId !== activeTurnPlayer.id;
+  const needsPrivacyCurtain = shouldShowPassAndPlayPrivacyCurtain({
+    isPassAndPlay,
+    openHandsTesting: settings.openHandsTesting,
+    phase: gameState.phase,
+    activeTurnPlayer,
+    revealedPlayerId,
+  });
+
+  const hidePassAndPlayHand = shouldHidePassAndPlayHand({
+    isPassAndPlay,
+    openHandsTesting: settings.openHandsTesting,
+    phase: gameState.phase,
+    activeTurnPlayer,
+    perspectivePlayer,
+    revealedPlayerId,
+  });
 
   // Opponents in clockwise order after perspectivePlayer
   const opponents = useMemo(() => {
@@ -181,61 +253,142 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     !perspectivePlayer.removed &&
     !perspectivePlayer.finished;
 
-  // Section 10: Exit Game is DISABLED mid-trick; only enabled between tricks!
+  // Section 10: Exit Game is DISABLED mid-trick for active players;
+  // officially finished (or already removed) online players can exit anytime without affecting the game.
+  const isFinishedOnlineExit =
+    isOnline && (perspectivePlayer.finished || perspectivePlayer.removed);
+  const canActivePassAndPlayExit =
+    !isPassAndPlay ||
+    (perspectivePlayer.type === 'human' && !perspectivePlayer.finished && !perspectivePlayer.removed);
   const exitAllowedNow =
-    gameState.phase === 'finished' ||
-    gameState.phase === 'trick_result' ||
-    gameState.currentTrick.plays.length === 0;
+    isFinishedOnlineExit ||
+    (canActivePassAndPlayExit &&
+      (gameState.phase === 'finished' ||
+        gameState.phase === 'trick_result' ||
+        gameState.currentTrick.plays.length === 0));
 
-  // Server deadline ticker for online rooms
+  // Practice vs Bots only: allow finishing the practice session early ONLY after official finish confirmation
+  const canFinishPracticeEarly = useMemo(
+    () =>
+      !isOnline &&
+      !isPassAndPlay &&
+      Boolean(onFinishPracticeEarly) &&
+      canFinishPracticeSessionEarly(
+        { phase: gameState.phase, players },
+        perspectivePlayer.id,
+        isPracticeVsBots
+      ),
+    [
+      isOnline,
+      isPassAndPlay,
+      onFinishPracticeEarly,
+      gameState.phase,
+      players,
+      perspectivePlayer.id,
+      isPracticeVsBots,
+    ]
+  );
+
+  // Close the early-finish dialog automatically if the practice match ends naturally
+  useEffect(() => {
+    if (!canFinishPracticeEarly) {
+      setConfirmFinishPractice(false);
+    }
+  }, [canFinishPracticeEarly]);
+
+  // Escape key dismisses active confirmation modals cleanly for keyboard users
+  useEffect(() => {
+    if (!confirmLeave && !confirmFinishPractice) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setConfirmLeave(false);
+        setConfirmFinishPractice(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [confirmLeave, confirmFinishPractice]);
+
+  // Server deadline ticker for online rooms (authoritative on server)
   useEffect(() => {
     if (!isOnline || !onlineRoom?.turnDeadlineAt) return;
     setNowMs(Date.now());
-    const id = window.setInterval(() => setNowMs(Date.now()), 500);
+    const id = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(id);
   }, [isOnline, onlineRoom?.turnDeadlineAt]);
 
-  // Local turn timer countdown for offline Practice / Pass-and-Play (Section 12 & 13)
-  const localTimerActive =
-    !isOnline &&
-    isPerspectivePlayersTurn &&
-    !needsPrivacyCurtain &&
-    !confirmLeave &&
-    settings.turnTimerSeconds > 0;
+  // Deadline-based local turn timer (preserves exact remaining time across Rules/Settings overlays)
+  const localTurnKey = !isOnline ? buildTurnKey(gameState) : null;
+  const localTimerEligible = !isOnline && isPerspectivePlayersTurn && !needsPrivacyCurtain;
 
   useEffect(() => {
-    if (!isOnline) {
-      setLocalSecondsLeft(settings.turnTimerSeconds);
+    if (isOnline) {
+      setLocalTimerState(EMPTY_LOCAL_TURN_TIMER);
+      return;
     }
+    const now = Date.now();
+    setNowMs(now);
+    setLocalTimerState((prev) =>
+      syncLocalTurnTimer(prev, {
+        turnKey: localTurnKey,
+        playerId: perspectivePlayer.id,
+        timerEligible: localTimerEligible,
+        turnTimerSeconds: settings.turnTimerSeconds,
+        nowMs: now,
+      })
+    );
   }, [
     isOnline,
-    gameState.currentTurnPlayerId,
-    gameState.currentTrick.trickNumber,
-    gameState.currentTrick.plays.length,
-    gameState.phase,
+    localTurnKey,
+    perspectivePlayer.id,
+    localTimerEligible,
     settings.turnTimerSeconds,
-    needsPrivacyCurtain,
   ]);
 
   useEffect(() => {
-    if (!localTimerActive) return;
-    if (localSecondsLeft <= 0) {
-      onLocalMissedTurn?.(perspectivePlayer.id);
+    onLocalTurnDeadlineChange?.(isOnline ? null : localTimerState.deadlineAt);
+  }, [isOnline, localTimerState.deadlineAt, onLocalTurnDeadlineChange]);
+
+  useEffect(() => {
+    firedTimeoutTurnKeyRef.current = null;
+  }, [localTimerState.turnKey]);
+
+  useEffect(() => {
+    if (isOnline || !localTimerState.deadlineAt || !localTimerState.turnKey || !localTimerState.playerId) {
       return;
     }
-    const id = window.setTimeout(() => {
-      setLocalSecondsLeft((prev) => Math.max(0, prev - 1));
-    }, 1000);
-    return () => window.clearTimeout(id);
-  }, [localTimerActive, localSecondsLeft, onLocalMissedTurn, perspectivePlayer.id]);
+
+    const checkTick = () => {
+      const now = Date.now();
+      setNowMs(now);
+      if (
+        isTimerExpired(localTimerState.deadlineAt, now) &&
+        firedTimeoutTurnKeyRef.current !== localTimerState.turnKey
+      ) {
+        firedTimeoutTurnKeyRef.current = localTimerState.turnKey;
+        onLocalMissedTurn?.(localTimerState.playerId!);
+      }
+    };
+
+    checkTick();
+    const id = window.setInterval(checkTick, 250);
+    return () => window.clearInterval(id);
+  }, [
+    isOnline,
+    localTimerState.deadlineAt,
+    localTimerState.turnKey,
+    localTimerState.playerId,
+    onLocalMissedTurn,
+  ]);
 
   const displaySecondsLeft: number | null = useMemo(() => {
     if (isOnline) {
       if (!onlineRoom?.turnDeadlineAt || gameState.phase !== 'playing') return null;
-      return Math.max(0, Math.ceil((onlineRoom.turnDeadlineAt - nowMs) / 1000));
+      return getRemainingSeconds(onlineRoom.turnDeadlineAt, nowMs);
     }
-    return localTimerActive ? localSecondsLeft : null;
-  }, [isOnline, onlineRoom?.turnDeadlineAt, gameState.phase, nowMs, localTimerActive, localSecondsLeft]);
+    if (!localTimerState.deadlineAt || gameState.phase !== 'playing') return null;
+    return getRemainingSeconds(localTimerState.deadlineAt, nowMs);
+  }, [isOnline, onlineRoom?.turnDeadlineAt, gameState.phase, nowMs, localTimerState.deadlineAt]);
 
   const legalCards = useMemo(
     () => (isPerspectivePlayersTurn ? computeLegalCards(gameState, perspectivePlayer) : []),
@@ -263,8 +416,25 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     );
   }, [gameState.currentTrick]);
 
+  const mediumHint = useMemo(
+    () =>
+      difficulty === 'medium' ? getMediumStrategicHint(gameState, perspectivePlayer.id) : null,
+    [difficulty, gameState, perspectivePlayer.id]
+  );
+
   const handleCardTap = (card: Card) => {
-    if (!isPerspectivePlayersTurn || !legalCardIds.has(card.id)) return;
+    if (!isPerspectivePlayersTurn) return;
+    if (!legalCardIds.has(card.id)) {
+      if (gameState.isFirstTurnOfGame) {
+        setRuleNotice('Play the Ace of Spades (A♠) to start the game.');
+      } else if (gameState.currentTrick.ledSuit) {
+        setRuleNotice(
+          `You must follow ${SUIT_NAMES[gameState.currentTrick.ledSuit]} (${SUIT_SYMBOLS[gameState.currentTrick.ledSuit]}).`
+        );
+      }
+      return;
+    }
+    setRuleNotice(null);
     if (settings.playTapMode === 'single-tap') {
       onPlayCard(perspectivePlayer.id, card.id);
       return;
@@ -279,6 +449,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
 
   const handleConfirmPlay = () => {
     if (!selectedCard || !isPerspectivePlayersTurn) return;
+    setRuleNotice(null);
     onPlayCard(perspectivePlayer.id, selectedCard.id);
     setSelectedCardId(null);
   };
@@ -317,10 +488,10 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
 
   return (
     <div className="min-h-screen h-[100dvh] flex flex-col felt-surface overflow-hidden">
-      {/* Top Wooden/Forest Header Bar (Matches Screenshot image_1d270c3e.png) */}
-      <header className="shrink-0 walnut-rail px-3 sm:px-5 py-2.5 flex items-center justify-between gap-2 z-20">
+      {/* Top Wooden/Forest Header Bar */}
+      <header className="shrink-0 walnut-rail px-2.5 sm:px-5 py-2 sm:py-2.5 flex items-center justify-between gap-1.5 sm:gap-2 z-20">
         {/* Left: Exit Button (Disabled Mid-Trick per Section 10) + Room Code */}
-        <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
           <button
             type="button"
             disabled={!exitAllowedNow}
@@ -331,32 +502,64 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                 ? 'Exit game between tricks'
                 : 'Wait for the current trick to finish before exiting'
             }
-            className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors shrink-0 ${
+            className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-colors shrink-0 ${
               exitAllowedNow
                 ? 'bg-[#214D2F] text-[#F5F2E8] hover:bg-[#2C643E] cursor-pointer'
                 : 'bg-[#173621] text-[#6B8B74] opacity-55 cursor-not-allowed'
             }`}
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut className="w-4 h-4" aria-hidden="true" />
           </button>
 
-          <span className="font-mono font-bold tracking-[0.14em] text-sm sm:text-base text-[#F5F2E8] whitespace-nowrap">
+          <span className="font-mono font-bold tracking-[0.1em] sm:tracking-[0.14em] text-xs sm:text-base text-[#F5F2E8] whitespace-nowrap truncate">
             {roomCode}
+          </span>
+
+          <span
+            className={`hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide border whitespace-nowrap ${
+              difficulty === 'easy'
+                ? 'bg-[#1D5631] text-[#D2F5DD] border-[#6EE7B7]/30'
+                : difficulty === 'medium'
+                  ? 'bg-[#4E380B] text-[#FDE68A] border-[#F0B429]/35'
+                  : 'bg-[#571F17] text-[#FED7D2] border-[#F87171]/35'
+            }`}
+          >
+            {DIFFICULTY_META[difficulty].label}
           </span>
         </div>
 
-        {/* Center/Right: Out Count Pill + Utility Icons */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <div className="px-3 py-1.5 rounded-full bg-[#13331E] border border-white/10 text-xs font-semibold text-[#E8F2EB] inline-flex items-center gap-1.5 tabular-nums">
-            <Trash2 className="w-3.5 h-3.5 text-[#F0B429]" />
-            <span>Out: {gameState.removedCards.length}</span>
-          </div>
+        {/* Center/Right: Easy Mobile Discards Toggle + Out Count Pill + Utility Icons */}
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+          {difficulty === 'easy' && (
+            <button
+              type="button"
+              onClick={() => setDiscardDrawerOpen(true)}
+              aria-label={`Open discarded cards tracker (${gameState.removedCards.length} discarded)`}
+              className="lg:hidden min-h-[36px] px-2.5 sm:px-3 py-1.5 rounded-full bg-[#1C4D2D] hover:bg-[#246038] border border-[#F0B429]/45 text-[11px] sm:text-xs font-semibold text-[#FDF3D1] inline-flex items-center gap-1 cursor-pointer tabular-nums"
+            >
+              <Layers className="w-3.5 h-3.5 text-[#F0B429] shrink-0" aria-hidden="true" />
+              <span className="hidden min-[360px]:inline">Discards:</span>
+              <span>{gameState.removedCards.length}</span>
+            </button>
+          )}
+
+          {difficulty !== 'hard' && (
+            <div
+              className={`${
+                difficulty === 'easy' ? 'hidden lg:inline-flex' : 'inline-flex'
+              } px-2.5 sm:px-3 py-1.5 rounded-full bg-[#13331E] border border-white/10 text-xs font-semibold text-[#E8F2EB] items-center gap-1.5 tabular-nums`}
+            >
+              <Trash2 className="w-3.5 h-3.5 text-[#F0B429]" aria-hidden="true" />
+              <span>Out: {gameState.removedCards.length}</span>
+            </div>
+          )}
 
           {isPassAndPlay && (
             <button
               type="button"
               onClick={onToggleOpenHands}
               aria-label="Toggle open hands testing"
+              aria-pressed={settings.openHandsTesting}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
                 settings.openHandsTesting
                   ? 'bg-[#F0B429] text-[#1D160B]'
@@ -364,9 +567,9 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
               }`}
             >
               {settings.openHandsTesting ? (
-                <Eye className="w-4 h-4" />
+                <Eye className="w-4 h-4" aria-hidden="true" />
               ) : (
-                <EyeOff className="w-4 h-4" />
+                <EyeOff className="w-4 h-4" aria-hidden="true" />
               )}
             </button>
           )}
@@ -375,12 +578,13 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             type="button"
             onClick={onToggleSound}
             aria-label={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+            aria-pressed={settings.soundEnabled}
             className="w-9 h-9 rounded-full bg-[#13331E] text-[#D8E8DD] hover:text-white flex items-center justify-center cursor-pointer"
           >
             {settings.soundEnabled ? (
-              <Volume2 className="w-4 h-4" />
+              <Volume2 className="w-4 h-4" aria-hidden="true" />
             ) : (
-              <VolumeX className="w-4 h-4 opacity-60" />
+              <VolumeX className="w-4 h-4 opacity-60" aria-hidden="true" />
             )}
           </button>
 
@@ -390,7 +594,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             aria-label="How to play"
             className="w-9 h-9 rounded-full bg-[#13331E] text-[#D8E8DD] hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <BookOpen className="w-4 h-4" />
+            <BookOpen className="w-4 h-4" aria-hidden="true" />
           </button>
 
           <button
@@ -399,17 +603,19 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             aria-label="Settings"
             className="w-9 h-9 rounded-full bg-[#13331E] text-[#D8E8DD] hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
       </header>
 
-      {/* Connection Reconnecting Banner (if WS momentarily drops) */}
-      {isOnline && connectionStatus !== 'connected' && (
-        <div className="bg-[#571C1C] text-[#FDE8E8] text-xs font-semibold px-4 py-1.5 flex items-center justify-center gap-2 z-20">
-          <WifiOff className="w-3.5 h-3.5" />
-          Reconnecting to table... Game continues without pausing.
-        </div>
+      {/* Connection Status Banner (Connecting / Reconnecting / Failed) */}
+      {isOnline && connectionInfo.status !== 'connected' && (
+        <ConnectionBanner
+          connectionInfo={connectionInfo}
+          variant="table"
+          onRetryNow={onRetryReconnect}
+          onReturnHome={onReturnHome}
+        />
       )}
 
       {/* Pending Host Transfer Request in-game */}
@@ -439,8 +645,10 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           </div>
         )}
 
-      {/* Main Table Felt Body */}
-      <main className="flex-1 min-h-0 relative flex flex-col justify-between gap-2 px-2.5 sm:px-6 pt-2 pb-2.5 overflow-y-auto">
+      {/* Body Wrapper: Table Felt + Desktop Easy Mode Discarded-Card Sidebar */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {/* Main Table Felt Body */}
+        <main className="flex-1 min-w-0 min-h-0 relative flex flex-col justify-between gap-2 px-2.5 sm:px-6 pt-2 pb-2.5 overflow-y-auto">
         {/* TOP OPPONENTS GRID — All 1 to 5 opponents always 100% visible with zero horizontal cutoff */}
         <section aria-label="Opponents" className="relative z-10 shrink-0 w-full mx-auto">
           <div
@@ -538,6 +746,10 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                         </span>
                       )}
 
+                      {!opp.finished && !opp.removed && isTurn && (
+                        <span className="text-[10px] font-bold text-[#FDE68A]">· Turn</span>
+                      )}
+
                       {!opp.finished && !opp.removed && playedThisTrick && (
                         <span className="text-[10px] font-semibold text-[#A7F3D0]">· Played</span>
                       )}
@@ -556,6 +768,11 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             })}
           </div>
         </section>
+
+        {/* MEDIUM MODE ONLY: Exact Remaining Suit Counts + Occasional Unobtrusive Hint */}
+        {difficulty === 'medium' && (
+          <MediumAssistBar removedCards={gameState.removedCards} hint={mediumHint} />
+        )}
 
         {/* CENTER BATTLE ZONE: Suit Pill + Played Cards + Prominent Amber Turn Banner */}
         <section
@@ -602,7 +819,11 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                       transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                       className="flex flex-col items-center gap-1"
                     >
-                      <PlayingCard card={tp.card} size={cardSize} highlighted={isHighest} />
+                      <PlayingCard
+                        card={tp.card}
+                        size={cardSize}
+                        highlighted={difficulty !== 'hard' && isHighest}
+                      />
                       <span className="text-[11px] font-semibold text-white/95 max-w-[74px] sm:max-w-[84px] truncate">
                         {owner?.name ?? 'Player'}
                       </span>
@@ -654,15 +875,49 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
               the next game once this round finishes.
             </div>
           ) : perspectivePlayer.finished ? (
-            <div className="rounded-2xl bg-[#133A22]/90 border border-[#86EFAC]/35 p-4 text-center text-sm text-[#E5F5EA]">
-              You finished safe in{' '}
-              <strong className="text-[#F5C954]">#{perspectivePlayer.finishOrder}</strong> place!
-              Watching the remaining players finish.
+            <div className="rounded-2xl bg-[#133A22]/92 border border-[#86EFAC]/35 p-4 text-center text-sm text-[#E5F5EA] flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="text-center sm:text-left">
+                You finished safe in{' '}
+                <strong className="text-[#F5C954]">#{perspectivePlayer.finishOrder}</strong> place!{' '}
+                {canFinishPracticeEarly
+                  ? 'You can finish this practice game now or keep watching the bots.'
+                  : 'Watching the remaining players finish.'}
+              </div>
+              {canFinishPracticeEarly && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmFinishPractice(true)}
+                  className="shrink-0 min-h-[44px] px-5 py-2.5 rounded-full btn-orange-3d font-display font-bold text-sm inline-flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Flag className="w-4 h-4" />
+                  Finish Game
+                </button>
+              )}
+            </div>
+          ) : hidePassAndPlayHand ? (
+            <div className="rounded-2xl bg-[#13361F]/88 border border-white/15 p-4 text-center text-sm text-[#D7E8DC]">
+              {gameState.phase === 'trick_result'
+                ? 'Trick resolved — cards stay hidden until the next player takes the device.'
+                : activeTurnPlayer?.type === 'bot'
+                  ? `Cards hidden while ${activeTurnPlayer.name} plays.`
+                  : 'Pass the device to the next player to view their hand.'}
             </div>
           ) : (
             <>
+              {ruleNotice && (
+                <p
+                  role="alert"
+                  className="text-center text-xs font-semibold text-[#FDE68A] mb-1"
+                >
+                  {ruleNotice}
+                </p>
+              )}
+
               {/* Fanned Playing Cards */}
-              <div className="w-full overflow-x-auto no-scrollbar pt-4 pb-1.5 px-2">
+              <div
+                aria-label="Playable hand cards"
+                className="w-full overflow-x-auto touch-pan-x no-scrollbar pt-4 pb-1.5 px-3"
+              >
                 <div
                   className={`flex items-end justify-start sm:justify-center min-w-max mx-auto ${
                     sortedHand.length > 10
@@ -671,8 +926,13 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                   }`}
                 >
                   {sortedHand.map((card) => {
-                    const playable = isPerspectivePlayersTurn && legalCardIds.has(card.id);
-                    const dimmed = isPerspectivePlayersTurn && !playable;
+                    const isLegal = isPerspectivePlayersTurn && legalCardIds.has(card.id);
+                    // Hard mode: never highlight or visually hint which cards to play.
+                    // Medium mode: never highlight/recommend cards either.
+                    const allowClick =
+                      difficulty === 'hard' ? isPerspectivePlayersTurn : isLegal;
+                    const dimmed =
+                      difficulty === 'hard' ? false : isPerspectivePlayersTurn && !isLegal;
                     const isSelected = selectedCardId === card.id;
 
                     return (
@@ -683,10 +943,10 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                         <PlayingCard
                           card={card}
                           size="lg"
-                          playable={playable}
+                          playable={allowClick}
                           selected={isSelected}
                           dimmed={dimmed}
-                          highlighted={playable && !isSelected}
+                          highlighted={false}
                           onClick={() => handleCardTap(card)}
                         />
                       </div>
@@ -696,7 +956,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
               </div>
 
               {/* Bottom Footer Bar: Player Name & Count + Large Rounded Play Button */}
-              <div className="mt-1 flex items-center justify-between gap-4 px-1">
+              <div className="mt-1 flex items-center justify-between gap-2.5 sm:gap-4 px-1">
                 <div className="min-w-0">
                   <div className="text-sm sm:text-base font-bold text-white truncate">
                     {perspectivePlayer.name}:{' '}
@@ -711,14 +971,14 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                   type="button"
                   disabled={!isPerspectivePlayersTurn || !selectedCard}
                   onClick={handleConfirmPlay}
-                  className={`min-h-[48px] sm:min-h-[52px] min-w-[156px] sm:min-w-[200px] px-6 sm:px-7 py-2.5 sm:py-3 rounded-full font-display font-bold text-base sm:text-lg flex items-center justify-center gap-2 transition-all ${
+                  className={`min-h-[48px] sm:min-h-[52px] min-w-[136px] sm:min-w-[200px] px-4 sm:px-7 py-2.5 sm:py-3 rounded-full font-display font-bold text-sm sm:text-lg flex items-center justify-center gap-2 transition-all shrink-0 ${
                     isPerspectivePlayersTurn && selectedCard
                       ? 'btn-orange-3d cursor-pointer'
                       : 'bg-[#6F5841]/75 text-[#D8C5B0] cursor-not-allowed'
                   }`}
                 >
-                  <span className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center">
-                    <ArrowUp className="w-4 h-4" />
+                  <span className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+                    <ArrowUp className="w-4 h-4" aria-hidden="true" />
                   </span>
                   {selectedCard ? `Play ${formatCard(selectedCard)}` : 'Play'}
                 </button>
@@ -728,6 +988,22 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
         </section>
       </main>
 
+      {/* EASY MODE ONLY: Desktop Permanent Discarded-Card Sidebar */}
+      {difficulty === 'easy' && (
+        <DiscardedCardTracker removedCards={gameState.removedCards} variant="sidebar" />
+      )}
+      </div>
+
+      {/* EASY MODE ONLY: Mobile Collapsible Discarded-Card Drawer */}
+      {difficulty === 'easy' && (
+        <DiscardedCardTracker
+          removedCards={gameState.removedCards}
+          variant="drawer"
+          open={discardDrawerOpen}
+          onClose={() => setDiscardDrawerOpen(false)}
+        />
+      )}
+
       {/* Non-Blocking Successful / Failed Trick Notification Banner */}
       <AnimatePresence>
         {gameState.phase === 'trick_result' && gameState.lastOutcome && (
@@ -736,7 +1012,8 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             players={players}
             autoAdvance={isOnline ? true : settings.autoAdvanceTricks}
             durationMs={trickNotificationDurationMs}
-            onContinue={onContinueTrick}
+            isServerControlled={isOnline}
+            onContinue={isOnline ? undefined : onContinueTrick}
           />
         )}
       </AnimatePresence>
@@ -744,18 +1021,19 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
       {/* Pass-and-Play Privacy Handoff Curtain */}
       {needsPrivacyCurtain && activeTurnPlayer && (
         <div
-          className="fixed inset-0 z-30 bg-[#102E1B]/96 backdrop-blur-xs flex items-center justify-center p-6"
+          className="fixed inset-0 z-30 bg-[#102E1B]/96 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6"
           role="dialog"
           aria-modal="true"
+          aria-labelledby="privacy-curtain-title"
         >
-          <div className="w-full max-w-sm rounded-3xl bg-[#FAF5ED] text-[#261E18] p-7 text-center shadow-2xl">
+          <div className="w-full max-w-sm max-h-[90dvh] overflow-y-auto rounded-3xl bg-[#FAF5ED] text-[#261E18] p-6 sm:p-7 text-center shadow-2xl">
             <div
               className="w-14 h-14 mx-auto rounded-full flex items-center justify-center font-display text-xl font-bold"
               style={{ backgroundColor: activeTurnPlayer.avatarColor }}
             >
               {activeTurnPlayer.name.slice(0, 1).toUpperCase()}
             </div>
-            <h2 className="mt-4 font-display text-2xl font-bold">
+            <h2 id="privacy-curtain-title" className="mt-4 font-display text-2xl font-bold">
               Pass Device to {activeTurnPlayer.name}
             </h2>
             <p className="mt-2 text-sm text-[#6E6052]">
@@ -779,36 +1057,98 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
         </div>
       )}
 
-      {/* Voluntary Exit Confirmation Modal (Only reachable between tricks per Section 10) */}
+      {/* Voluntary Exit Confirmation Modal */}
       {confirmLeave && (
         <div
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
+          aria-labelledby="confirm-exit-title"
+          onClick={() => setConfirmLeave(false)}
         >
-          <div className="w-full max-w-sm rounded-3xl bg-[#FAF5ED] text-[#261E18] p-6 shadow-2xl">
-            <h2 className="font-display text-xl font-bold">Exit Game Between Tricks?</h2>
+          <div
+            className="w-full max-w-sm max-h-[90dvh] overflow-y-auto rounded-3xl bg-[#FAF5ED] text-[#261E18] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="confirm-exit-title" className="font-display text-xl font-bold">
+              {isFinishedOnlineExit
+                ? 'Leave Ongoing Table?'
+                : isPassAndPlay
+                  ? `Exit Game as ${perspectivePlayer.name}?`
+                  : 'Exit Game Between Tricks?'}
+            </h2>
             <p className="mt-2 text-sm text-[#5C4E41] leading-relaxed">
-              Your remaining cards will be shuffled and distributed clockwise among the remaining
-              active players so the game can continue fairly.
+              {isFinishedOnlineExit
+                ? perspectivePlayer.finished
+                  ? 'You have already finished your cards. Leaving now will preserve your finishing position and will not affect the remaining players.'
+                  : 'You are no longer active in this round. Leaving now will return you to the Welcome screen.'
+                : isPassAndPlay
+                  ? `${perspectivePlayer.name}’s remaining cards will be shuffled and distributed clockwise among the remaining active players, and the match will continue for everyone else.`
+                  : 'Your remaining cards will be shuffled and distributed clockwise among the remaining active players so the game can continue fairly.'}
             </p>
-            <div className="mt-6 flex items-center justify-end gap-2.5">
+            <div className="mt-6 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2.5">
               <button
                 type="button"
                 onClick={() => setConfirmLeave(false)}
                 className="min-h-[44px] px-4 py-2 rounded-xl bg-[#EFE6D8] text-[#261E18] text-sm font-semibold cursor-pointer"
               >
-                Keep Playing
+                {isFinishedOnlineExit ? 'Continue Watching' : 'Keep Playing'}
               </button>
               <button
                 type="button"
                 onClick={() => {
                   setConfirmLeave(false);
-                  onVoluntaryExit();
+                  onVoluntaryExit(perspectivePlayer.id);
                 }}
                 className="min-h-[44px] px-4 py-2 rounded-xl bg-[#D95732] text-white text-sm font-bold cursor-pointer"
               >
-                Exit Game
+                {isFinishedOnlineExit
+                  ? 'Leave Table'
+                  : isPassAndPlay
+                    ? `Exit as ${perspectivePlayer.name}`
+                    : 'Exit Game'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Practice vs Bots Early Finish Confirmation Dialog */}
+      {confirmFinishPractice && canFinishPracticeEarly && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="finish-practice-title"
+          onClick={() => setConfirmFinishPractice(false)}
+        >
+          <div
+            className="w-full max-w-sm max-h-[90dvh] overflow-y-auto rounded-3xl bg-[#FAF5ED] text-[#261E18] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="finish-practice-title" className="font-display text-xl font-bold">
+              Finish Practice Game?
+            </h2>
+            <p className="mt-2 text-sm text-[#5C4E41] leading-relaxed">
+              You have finished your cards. Would you like to end this practice game?
+            </p>
+            <div className="mt-6 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setConfirmFinishPractice(false)}
+                className="min-h-[44px] px-4 py-2 rounded-xl bg-[#EFE6D8] hover:bg-[#E5D9C6] text-[#261E18] text-sm font-semibold cursor-pointer"
+              >
+                Continue Watching
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmFinishPractice(false);
+                  onFinishPracticeEarly?.();
+                }}
+                className="min-h-[44px] px-5 py-2 rounded-xl bg-[#D95732] hover:bg-[#C44B27] text-white text-sm font-bold cursor-pointer"
+              >
+                Finish Game
               </button>
             </div>
           </div>

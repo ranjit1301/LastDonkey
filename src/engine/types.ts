@@ -13,7 +13,33 @@ export interface Card {
 }
 
 export type PlayerType = 'human' | 'bot';
-export type BotDifficulty = 'random';
+export type DifficultyMode = 'easy' | 'medium' | 'hard';
+export type BotDifficulty = DifficultyMode;
+
+export interface BotPublicPlayerInfo {
+  id: string;
+  seatIndex: number;
+  cardCount: number;
+  finished: boolean;
+  removed: boolean;
+}
+
+export interface BotPublicObservation {
+  botId: string;
+  ownHand: readonly Card[];
+  legalCards: readonly Card[];
+  isFirstTurnOfGame: boolean;
+  currentTrick: {
+    trickNumber: number;
+    ledSuit: Suit | null;
+    plays: readonly TrickPlay[];
+    expectedPlayerIds: readonly string[];
+  };
+  removedCards: readonly Card[];
+  trickHistory: readonly TrickOutcome[];
+  redistributionHistory: readonly RedistributionEvent[];
+  players: readonly BotPublicPlayerInfo[];
+}
 
 export interface PlayerConfig {
   id: string;
@@ -82,10 +108,13 @@ export interface RedistributionEvent {
   reason: 'voluntary_exit' | 'missed_turns';
   cardsDistributedCount: number;
   recipientCounts: Record<string, number>;
+  /** Number of completed tricks in trickHistory when this redistribution occurred (public timeline marker) */
+  afterTrickCount?: number;
 }
 
 export interface GameState {
   phase: GamePhase;
+  difficulty: DifficultyMode;
   players: Player[];
   currentTrick: CurrentTrick;
   currentTurnPlayerId: string | null;
@@ -100,6 +129,8 @@ export interface GameState {
   donkeyPlayerId: string | null;
   endReason: string | null;
   lastRedistribution: RedistributionEvent | null;
+  /** Chronological log of public redistribution events (zero hidden card data) */
+  redistributionHistory?: RedistributionEvent[];
 }
 
 export interface PlayResult {

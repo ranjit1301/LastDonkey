@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Bot, Globe, Lock, Users } from 'lucide-react';
-import { getDealingCounts } from '../engine';
+import { getDealingCounts, type DifficultyMode } from '../engine';
+import { DifficultySelector } from '../components/DifficultySelector';
 import {
   buildDefaultPlayers,
   generateRoomCode,
+  sanitizeLocalLobbyConfig,
   type LocalLobbyConfig,
   type TurnTimerSeconds,
 } from '../lib/settings';
@@ -15,6 +17,7 @@ interface CreateGameScreenProps {
   initialMode: CreateRoomMode;
   initialPlayerName: string;
   defaultTurnTimer: TurnTimerSeconds;
+  defaultDifficulty: DifficultyMode;
   onBack: () => void;
   onCreateOnlineRoom: (params: {
     playerName: string;
@@ -22,6 +25,7 @@ interface CreateGameScreenProps {
     capacity: number;
     visibility: RoomVisibility;
     turnTimerSeconds: TurnTimerSeconds;
+    difficulty: DifficultyMode;
   }) => void;
   onCreateLocalLobby: (config: LocalLobbyConfig) => void;
 }
@@ -32,6 +36,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
   initialMode,
   initialPlayerName,
   defaultTurnTimer,
+  defaultDifficulty,
   onBack,
   onCreateOnlineRoom,
   onCreateLocalLobby,
@@ -42,6 +47,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
   const [capacity, setCapacity] = useState<number>(4);
   const [visibility, setVisibility] = useState<RoomVisibility>('private');
   const [turnTimerSeconds, setTurnTimerSeconds] = useState<TurnTimerSeconds>(defaultTurnTimer);
+  const [difficulty, setDifficulty] = useState<DifficultyMode>(defaultDifficulty);
 
   const dealingCounts = getDealingCounts(capacity);
 
@@ -57,23 +63,27 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
         capacity,
         visibility,
         turnTimerSeconds,
+        difficulty,
       });
       return;
     }
 
     const localMode = createMode === 'pass-and-play' ? 'pass-and-play' : 'bots';
-    onCreateLocalLobby({
-      roomCode: generateRoomCode(),
-      tableName: cleanTable,
-      mode: localMode,
-      visibility: 'private',
-      capacity,
-      players: buildDefaultPlayers(capacity, cleanName, localMode),
-    });
+    onCreateLocalLobby(
+      sanitizeLocalLobbyConfig({
+        roomCode: generateRoomCode(),
+        tableName: cleanTable,
+        mode: localMode,
+        visibility: 'private',
+        capacity,
+        difficulty,
+        players: buildDefaultPlayers(capacity, cleanName, localMode),
+      })
+    );
   };
 
   return (
-    <div className="min-h-screen cream-surface flex flex-col">
+    <div className="min-h-screen cream-surface overflow-x-hidden flex flex-col">
       <header className="w-full max-w-2xl mx-auto px-4 sm:px-6 pt-5 pb-4 flex items-center gap-3">
         <button
           type="button"
@@ -101,7 +111,11 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
           className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-5 sm:p-7 space-y-6 shadow-sm"
         >
           {/* Mode Switcher */}
-          <div className="grid grid-cols-3 gap-2 p-1.5 rounded-2xl bg-[#E9DFCE]">
+          <div
+            role="group"
+            aria-label="Game mode"
+            className="grid grid-cols-3 gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-[#E9DFCE]"
+          >
             {(
               [
                 { id: 'online', label: 'Online Room', icon: Globe },
@@ -114,14 +128,15 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
                 <button
                   key={id}
                   type="button"
+                  aria-pressed={active}
                   onClick={() => setCreateMode(id)}
-                  className={`min-h-[42px] px-2.5 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                  className={`min-h-[46px] px-1.5 sm:px-2.5 py-2 rounded-xl text-[11px] sm:text-sm font-semibold flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 text-center leading-tight transition-all cursor-pointer ${
                     active
                       ? 'bg-[#FAF5ED] text-[#261E18] shadow-sm'
                       : 'text-[#5C4E41] hover:text-[#261E18]'
                   }`}
                 >
-                  <Icon className="w-4 h-4 shrink-0" />
+                  <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
                   <span>{label}</span>
                 </button>
               );
@@ -176,13 +191,14 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-5 gap-2">
+            <div role="group" aria-label="Room capacity" className="grid grid-cols-5 gap-2">
               {PLAYER_COUNTS.map((count) => {
                 const active = capacity === count;
                 return (
                   <button
                     key={count}
                     type="button"
+                    aria-pressed={active}
                     onClick={() => setCapacity(count)}
                     className={`min-h-[50px] rounded-2xl font-bold text-base tabular-nums transition-all cursor-pointer border ${
                       active
@@ -201,15 +217,19 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
             </p>
           </div>
 
+          {/* Difficulty Mode Selection (Easy · Medium · Hard) */}
+          <DifficultySelector value={difficulty} onChange={setDifficulty} />
+
           {/* Private vs Public Room Toggle (Online Only) */}
           {createMode === 'online' && (
             <div>
               <span className="block text-sm font-semibold text-[#3A2E25] mb-2.5">
                 Room Visibility
               </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div role="group" aria-label="Room visibility" className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   type="button"
+                  aria-pressed={visibility === 'private'}
                   onClick={() => setVisibility('private')}
                   className={`p-4 rounded-2xl text-left transition-all cursor-pointer border ${
                     visibility === 'private'
@@ -218,7 +238,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
                   }`}
                 >
                   <div className="flex items-center gap-2 font-bold text-sm text-[#261E18]">
-                    <Lock className="w-4 h-4 text-[#D95732]" />
+                    <Lock className="w-4 h-4 text-[#D95732]" aria-hidden="true" />
                     Private Room
                   </div>
                   <p className="mt-1 text-xs text-[#6E6052] leading-relaxed">
@@ -229,6 +249,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
 
                 <button
                   type="button"
+                  aria-pressed={visibility === 'public'}
                   onClick={() => setVisibility('public')}
                   className={`p-4 rounded-2xl text-left transition-all cursor-pointer border ${
                     visibility === 'public'
@@ -237,7 +258,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
                   }`}
                 >
                   <div className="flex items-center gap-2 font-bold text-sm text-[#261E18]">
-                    <Globe className="w-4 h-4 text-[#365B40]" />
+                    <Globe className="w-4 h-4 text-[#365B40]" aria-hidden="true" />
                     Public Room
                   </div>
                   <p className="mt-1 text-xs text-[#6E6052] leading-relaxed">
@@ -254,13 +275,18 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
               <span className="block text-sm font-semibold text-[#3A2E25] mb-2">
                 Turn Timer (Auto-Plays Random Legal Card)
               </span>
-              <div className="inline-flex flex-wrap gap-1.5 p-1 rounded-xl bg-[#E9DFCE]">
+              <div
+                role="group"
+                aria-label="Turn timer"
+                className="inline-flex flex-wrap gap-1.5 p-1 rounded-xl bg-[#E9DFCE]"
+              >
                 {([0, 10, 15, 20, 30] as TurnTimerSeconds[]).map((sec) => (
                   <button
                     key={sec}
                     type="button"
+                    aria-pressed={turnTimerSeconds === sec}
                     onClick={() => setTurnTimerSeconds(sec)}
-                    className={`px-3.5 py-2 rounded-lg text-xs font-semibold font-mono tabular-nums cursor-pointer transition-colors ${
+                    className={`min-h-[38px] px-3.5 py-2 rounded-lg text-xs font-semibold font-mono tabular-nums cursor-pointer transition-colors ${
                       turnTimerSeconds === sec
                         ? 'bg-[#365B40] text-white'
                         : 'text-[#4E4136] hover:text-[#261E18]'

@@ -105,6 +105,24 @@
   scrollbar-width: none;
 }
 
+/* Clear keyboard focus rings on both warm parchment and dark green felt surfaces */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #d95732;
+  outline-offset: 2px;
+}
+
+.felt-surface button:focus-visible,
+.felt-surface a:focus-visible,
+.felt-surface [tabindex]:focus-visible,
+.walnut-rail button:focus-visible {
+  outline: 2px solid #f5c954;
+  outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

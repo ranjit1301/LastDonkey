@@ -1,18 +1,20 @@
 import crypto from 'node:crypto';
 import {
   canVoluntarilyExit,
-  chooseRandomLegalCard,
+  chooseBotCard,
   continueAfterTrick,
   createInitialGameState,
   formatCard,
   handleMissedTurn,
+  isDifficultyMode,
   markPlayerConnection,
   playCard,
   removePlayerAndRedistribute,
+  type DifficultyMode,
   type GameState,
   type PlayerConfig,
-} from '../engine';
-import type { TurnTimerSeconds } from '../lib/settings';
+} from '../engine/index.ts';
+import type { TurnTimerSeconds } from '../lib/settings.ts';
 import type {
   ClientGameStateView,
   ClientRoomState,
@@ -23,12 +25,32 @@ import type {
   RoomSeat,
   RoomStatus,
   RoomVisibility,
-} from './roomTypes';
+} from './roomTypes.ts';
 
 const BOT_NAMES = ['Bot Raju', 'Bot Pinky', 'Bot Golu', 'Bot Meera', 'Bot Kabir', 'Bot Priya'];
 const AVATAR_COLORS = ['#E59A00', '#2E6340', '#D95732', '#3A6B8A', '#8B5E83', '#B57435'];
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+export const ALLOWED_TURN_TIMER_SECONDS = [0, 10, 15, 20, 30] as const;
+const MAX_EXPIRED_CODES = 1000;
+
+export function isValidTurnTimerSeconds(value: unknown): value is TurnTimerSeconds {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (ALLOWED_TURN_TIMER_SECONDS as readonly number[]).includes(value)
+  );
+}
+
+function sanitizeDisplayText(raw: string, maxLen: number): string {
+  // Strip control characters and collapse repeated whitespace
+  return raw
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
 
 export interface InternalRoom {
   roomCode: string;
@@ -36,6 +58,7 @@ export interface InternalRoom {
   visibility: RoomVisibility;
   capacity: number;
   status: RoomStatus;
+  difficulty: DifficultyMode;
   inviteToken: string;
   revokedTokens: Set<string>;
   hostPlayerId: string | null;
@@ -52,6 +75,8 @@ export interface InternalRoom {
   rematch: RematchState | null;
   closeReason: string | null;
   createdAt: number;
+  lastActivityAt: number;
+  finishedAt: number | null;
   // Server timers
   turnTimer?: ReturnType<typeof setTimeout>;
   botTimer?: ReturnType<typeof setTimeout>;
@@ -65,6 +90,9 @@ export interface RoomEventSink {
   onRoomUpdated: (room: InternalRoom) => void;
   onNotification: (room: InternalRoom, notification: RoomNotification) => void;
   onRoomClosed: (roomCode: string, reason: string, memberPlayerIds: string[]) => void;
+  onPlayerKicked?: (roomCode: string, playerId: string, reason: string) => void;
+  onRoomCodeChanged?: (oldCode: string, newCode: string, room: InternalRoom) => void;
+  onPlayerDetached?: (roomCode: string, playerId: string, reason: string) => void;
 }
 
 export interface RoomManagerOptions {
@@ -74,6 +102,12 @@ export interface RoomManagerOptions {
   trickSuccessDelayMs?: number; // Default: 1500ms
   trickFailDelayMs?: number; // Default: 2100ms
   aiAutoStartDelayMs?: number; // Default: 1200ms
+  disconnectedFallbackTimerSeconds?: number; // Default: 15s fallback when turnTimerSeconds === 0
+  maxActiveRooms?: number; // Default: 200
+  idleWaitingTimeoutMs?: number; // Default: 30 minutes
+  abandonedWaitingTimeoutMs?: number; // Default: 5 minutes (0 connected humans in waiting room)
+  finishedRoomTimeoutMs?: number; // Default: 15 minutes
+  cleanupIntervalMs?: number; // Default: 60s (0 disables background sweeper)
   rng?: () => number;
 }
 
@@ -82,9 +116,12 @@ export class RoomManager {
   private expiredRoomCodes = new Set<string>();
   private sink: RoomEventSink;
   private opts: Required<RoomManagerOptions>;
+  private readonly hasCustomRng: boolean;
+  private cleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(sink: RoomEventSink, options: RoomManagerOptions = {}) {
     this.sink = sink;
+    this.hasCustomRng = typeof options.rng === 'function';
     this.opts = {
       publicVacancyTimeoutMs: options.publicVacancyTimeoutMs ?? 120_000,
       rematchTimeoutMs: options.rematchTimeoutMs ?? 30_000,
@@ -92,17 +129,35 @@ export class RoomManager {
       trickSuccessDelayMs: options.trickSuccessDelayMs ?? 1500,
       trickFailDelayMs: options.trickFailDelayMs ?? 2100,
       aiAutoStartDelayMs: options.aiAutoStartDelayMs ?? 1200,
+      disconnectedFallbackTimerSeconds: options.disconnectedFallbackTimerSeconds ?? 15,
+      maxActiveRooms: options.maxActiveRooms ?? 200,
+      idleWaitingTimeoutMs: options.idleWaitingTimeoutMs ?? 30 * 60 * 1000,
+      abandonedWaitingTimeoutMs: options.abandonedWaitingTimeoutMs ?? 5 * 60 * 1000,
+      finishedRoomTimeoutMs: options.finishedRoomTimeoutMs ?? 15 * 60 * 1000,
+      cleanupIntervalMs: options.cleanupIntervalMs ?? 60_000,
       rng: options.rng ?? Math.random,
     };
+
+    if (this.opts.cleanupIntervalMs > 0) {
+      this.cleanupTimer = setInterval(() => {
+        this.cleanupStaleRooms();
+      }, this.opts.cleanupIntervalMs);
+      if (typeof this.cleanupTimer.unref === 'function') {
+        this.cleanupTimer.unref();
+      }
+    }
   }
 
   private generateCode(): string {
     for (let attempt = 0; attempt < 50; attempt++) {
       let code = '';
       for (let i = 0; i < 6; i++) {
-        code += CODE_CHARS[Math.floor(this.opts.rng() * CODE_CHARS.length)];
+        const idx = this.hasCustomRng
+          ? Math.floor(this.opts.rng() * CODE_CHARS.length)
+          : crypto.randomInt(CODE_CHARS.length);
+        code += CODE_CHARS[idx];
       }
-      if (!this.rooms.has(code)) return code;
+      if (!this.rooms.has(code) && !this.expiredRoomCodes.has(code)) return code;
     }
     return crypto.randomBytes(3).toString('hex').toUpperCase();
   }
@@ -141,7 +196,119 @@ export class RoomManager {
     room.aiStartTimer = undefined;
   }
 
+  private recordExpiredCode(code: string): void {
+    this.expiredRoomCodes.add(code);
+    if (this.expiredRoomCodes.size > MAX_EXPIRED_CODES) {
+      const oldest = this.expiredRoomCodes.values().next().value;
+      if (oldest) this.expiredRoomCodes.delete(oldest);
+    }
+  }
+
+  private touchRoom(room: InternalRoom): void {
+    room.lastActivityAt = Date.now();
+  }
+
+  private revokePlayerTokens(room: InternalRoom, playerId: string): void {
+    for (const [tok, pid] of room.sessionTokens.entries()) {
+      if (pid === playerId) room.sessionTokens.delete(tok);
+    }
+  }
+
+  private cancelAiStartTimer(room: InternalRoom): void {
+    if (room.aiStartTimer) {
+      clearTimeout(room.aiStartTimer);
+      room.aiStartTimer = undefined;
+    }
+  }
+
+  private isConnectedHost(room: InternalRoom, playerId: string): boolean {
+    if (room.hostPlayerId !== playerId) return false;
+    return room.seats.some((s) => s.playerId === playerId && s.type === 'human' && s.connected);
+  }
+
+  private buildPublicRoomSummary(room: InternalRoom): PublicRoomSummary {
+    const hostSeat = room.hostPlayerId
+      ? room.seats.find((s) => s.playerId === room.hostPlayerId)
+      : null;
+    const hostName = hostSeat
+      ? hostSeat.name
+      : room.aiHostActive
+        ? 'AI Room Host'
+        : room.seats.find((s) => s.type === 'human')?.name ?? 'Host';
+    const availableSeats = Math.max(0, room.capacity - room.seats.length);
+    const isFull = room.seats.length >= room.capacity;
+    const joinable = room.status === 'waiting' && !isFull;
+
+    return {
+      roomCode: room.roomCode,
+      tableName: room.tableName,
+      hostName,
+      capacity: room.capacity,
+      playerCount: room.seats.length,
+      availableSeats,
+      isFull,
+      joinable,
+      status: room.status,
+      difficulty: room.difficulty,
+      turnTimerSeconds: room.turnTimerSeconds,
+      aiHostActive: room.aiHostActive,
+      vacancyExpiresAt: room.vacancyExpiresAt,
+    };
+  }
+
+  public getRoomCount(): number {
+    return this.rooms.size;
+  }
+
+  /**
+   * Cleans up abandoned waiting rooms, idle waiting rooms, and completed finished rooms.
+   * NEVER removes an active game in 'playing' status.
+   */
+  public cleanupStaleRooms(now = Date.now()): number {
+    const toClose: Array<{ room: InternalRoom; reason: string }> = [];
+
+    for (const room of this.rooms.values()) {
+      // Safety invariant: NEVER clean up active games while playing!
+      if (room.status === 'playing') continue;
+
+      if (room.status === 'waiting') {
+        const connectedHumans = room.seats.filter((s) => s.type === 'human' && s.connected).length;
+        const idleMs = now - room.lastActivityAt;
+        if (connectedHumans === 0 && idleMs >= this.opts.abandonedWaitingTimeoutMs) {
+          toClose.push({
+            room,
+            reason: 'Room closed automatically because all players disconnected.',
+          });
+        } else if (idleMs >= this.opts.idleWaitingTimeoutMs) {
+          toClose.push({
+            room,
+            reason: 'Room closed automatically due to inactivity.',
+          });
+        }
+      } else if (room.status === 'finished') {
+        const refTime = Math.max(room.lastActivityAt, room.finishedAt ?? room.lastActivityAt);
+        const elapsedMs = now - refTime;
+        const hasActiveRematch = room.rematch !== null && room.rematch.expiresAt > now;
+        if (!hasActiveRematch && elapsedMs >= this.opts.finishedRoomTimeoutMs) {
+          toClose.push({
+            room,
+            reason: 'Completed room expired after inactivity.',
+          });
+        }
+      }
+    }
+
+    for (const entry of toClose) {
+      this.closeRoom(entry.room, entry.reason);
+    }
+    return toClose.length;
+  }
+
   public disposeAll(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
     for (const room of this.rooms.values()) {
       this.clearAllTimers(room);
     }
@@ -153,22 +320,32 @@ export class RoomManager {
   }
 
   public getPublicRooms(): PublicRoomSummary[] {
-    const list: PublicRoomSummary[] = [];
+    // Reclaim any expired waiting/finished rooms so stale rooms never appear in discovery
+    this.cleanupStaleRooms();
+
+    const list: Array<{ summary: PublicRoomSummary; createdAt: number }> = [];
     for (const room of this.rooms.values()) {
       if (room.visibility !== 'public') continue;
-      if (room.status !== 'waiting') continue;
+      if (room.status !== 'waiting' && room.status !== 'playing') continue;
       list.push({
-        roomCode: room.roomCode,
-        tableName: room.tableName,
-        capacity: room.capacity,
-        playerCount: room.seats.length,
-        isFull: room.seats.length >= room.capacity,
-        status: room.status,
-        aiHostActive: room.aiHostActive,
-        vacancyExpiresAt: room.vacancyExpiresAt,
+        summary: this.buildPublicRoomSummary(room),
+        createdAt: room.createdAt,
       });
     }
-    return list.sort((a, b) => Number(a.isFull) - Number(b.isFull));
+
+    const rank = (s: PublicRoomSummary): number => {
+      if (s.joinable) return 0; // Open waiting rooms first
+      if (s.status === 'waiting') return 1; // Full waiting rooms next
+      return 2; // In-progress public rooms last
+    };
+
+    return list
+      .sort((a, b) => {
+        const diff = rank(a.summary) - rank(b.summary);
+        if (diff !== 0) return diff;
+        return b.createdAt - a.createdAt;
+      })
+      .map((entry) => entry.summary);
   }
 
   public validateRoomAccess(
@@ -203,16 +380,7 @@ export class RoomManager {
     return {
       ok: true,
       visibility: room.visibility,
-      room: {
-        roomCode: room.roomCode,
-        tableName: room.tableName,
-        capacity: room.capacity,
-        playerCount: room.seats.length,
-        isFull: room.seats.length >= room.capacity,
-        status: room.status,
-        aiHostActive: room.aiHostActive,
-        vacancyExpiresAt: room.vacancyExpiresAt,
-      },
+      room: this.buildPublicRoomSummary(room),
     };
   }
 
@@ -254,6 +422,7 @@ export class RoomManager {
       visibility: room.visibility,
       capacity: room.capacity,
       status: room.status,
+      difficulty: room.difficulty,
       inviteToken: room.inviteToken,
       hostPlayerId: room.hostPlayerId,
       aiHostActive: room.aiHostActive,
@@ -276,19 +445,49 @@ export class RoomManager {
     tableName?: string;
     capacity: number;
     visibility: RoomVisibility;
-    turnTimerSeconds?: TurnTimerSeconds;
+    turnTimerSeconds?: unknown;
+    difficulty?: DifficultyMode;
   }):
     | { ok: true; room: InternalRoom; playerId: string; sessionToken: string }
     | { ok: false; error: string } {
     if (!Number.isInteger(params.capacity) || params.capacity < 2 || params.capacity > 6) {
       return { ok: false, error: 'Room capacity must be between 2 and 6 players.' };
     }
-    const cleanName = params.playerName.trim().slice(0, 20) || 'Player 1';
-    const cleanTable = (params.tableName ?? '').trim().slice(0, 28) || `${cleanName}’s Room`;
+
+    // Validate turnTimerSeconds authoritatively on room creation
+    let turnTimerSeconds: TurnTimerSeconds = 15;
+    if (params.turnTimerSeconds !== undefined) {
+      if (!isValidTurnTimerSeconds(params.turnTimerSeconds)) {
+        return {
+          ok: false,
+          error: 'Invalid turn timer option. Allowed values: Off (0s), 10s, 15s, 20s, or 30s.',
+        };
+      }
+      turnTimerSeconds = params.turnTimerSeconds;
+    }
+
+    // Reclaim stale waiting/completed rooms before checking capacity limit
+    if (this.rooms.size >= this.opts.maxActiveRooms) {
+      this.cleanupStaleRooms();
+      if (this.rooms.size >= this.opts.maxActiveRooms) {
+        return {
+          ok: false,
+          error: 'Server is currently at room capacity. Please try again in a moment.',
+        };
+      }
+    }
+
+    const cleanName = sanitizeDisplayText(params.playerName, 20) || 'Player 1';
+    const cleanTable =
+      sanitizeDisplayText(params.tableName ?? '', 28) || `${cleanName}’s Room`;
+    const difficulty: DifficultyMode = isDifficultyMode(params.difficulty)
+      ? params.difficulty
+      : 'easy';
 
     const roomCode = this.generateCode();
     const playerId = `u_${crypto.randomBytes(6).toString('hex')}`;
     const sessionToken = this.generateToken();
+    const now = Date.now();
 
     const seat: RoomSeat = {
       playerId,
@@ -296,7 +495,7 @@ export class RoomManager {
       type: 'human',
       connected: true,
       avatarColor: AVATAR_COLORS[0],
-      joinedAt: Date.now(),
+      joinedAt: now,
     };
 
     const room: InternalRoom = {
@@ -305,13 +504,14 @@ export class RoomManager {
       visibility: params.visibility,
       capacity: params.capacity,
       status: 'waiting',
+      difficulty,
       inviteToken: this.generateToken(),
       revokedTokens: new Set(),
       hostPlayerId: playerId,
       aiHostActive: false,
       suspendedHostId: null,
       pendingHostTransfer: null,
-      turnTimerSeconds: params.turnTimerSeconds ?? 15,
+      turnTimerSeconds,
       turnDeadlineAt: null,
       vacancyExpiresAt: null,
       seats: [seat],
@@ -320,7 +520,9 @@ export class RoomManager {
       gameState: null,
       rematch: null,
       closeReason: null,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastActivityAt: now,
+      finishedAt: null,
     };
 
     this.rooms.set(roomCode, room);
@@ -345,8 +547,26 @@ export class RoomManager {
     if (!check.ok) return check;
 
     const room = this.rooms.get(params.roomCode.trim().toUpperCase())!;
-    const cleanName =
-      params.playerName.trim().slice(0, 20) || `Player ${room.seats.length + 1}`;
+    const existingNamesLower = new Set(room.seats.map((s) => s.name.trim().toLowerCase()));
+    const requestedName = sanitizeDisplayText(params.playerName, 20);
+
+    let cleanName: string;
+    if (requestedName) {
+      if (existingNamesLower.has(requestedName.toLowerCase())) {
+        return {
+          ok: false,
+          error: 'That player name is already taken in this room. Please choose a different name.',
+        };
+      }
+      cleanName = requestedName;
+    } else {
+      let num = room.seats.length + 1;
+      while (existingNamesLower.has(`player ${num}`)) {
+        num += 1;
+      }
+      cleanName = `Player ${num}`;
+    }
+
     const playerId = `u_${crypto.randomBytes(6).toString('hex')}`;
     const sessionToken = this.generateToken();
 
@@ -361,6 +581,7 @@ export class RoomManager {
 
     room.seats.push(seat);
     room.sessionTokens.set(sessionToken, playerId);
+    this.touchRoom(room);
 
     // Clear public vacancy timeout if a replacement joined!
     if (room.vacancyTimer) {
@@ -378,34 +599,76 @@ export class RoomManager {
     return { ok: true, room, playerId, sessionToken };
   }
 
+  /**
+   * Read-only session token check used before accepting a reconnect (e.g., to reject duplicate
+   * active-tab reconnect attempts without mutating room state or emitting notifications).
+   */
+  public validateSessionToken(
+    roomCode: string,
+    sessionToken: string
+  ):
+    | { ok: true; roomCode: string; playerId: string }
+    | { ok: false; error: string; code: 'ROOM_NOT_FOUND' | 'SESSION_INVALID' } {
+    const room = this.rooms.get(roomCode.trim().toUpperCase());
+    if (!room || room.status === 'closed') {
+      return { ok: false, error: 'Room no longer exists.', code: 'ROOM_NOT_FOUND' };
+    }
+    const playerId = room.sessionTokens.get(sessionToken);
+    if (!playerId || !room.seats.some((s) => s.playerId === playerId)) {
+      return { ok: false, error: 'Session is invalid or expired.', code: 'SESSION_INVALID' };
+    }
+    return { ok: true, roomCode: room.roomCode, playerId };
+  }
+
   public reconnectPlayer(
     roomCode: string,
     sessionToken: string
   ):
     | { ok: true; room: InternalRoom; playerId: string; removedFromOngoingGame: boolean }
-    | { ok: false; error: string } {
+    | { ok: false; error: string; code: 'ROOM_NOT_FOUND' | 'SESSION_INVALID' } {
     const room = this.rooms.get(roomCode.trim().toUpperCase());
     if (!room || room.status === 'closed') {
-      return { ok: false, error: 'Room no longer exists.' };
+      return { ok: false, error: 'Room no longer exists.', code: 'ROOM_NOT_FOUND' };
     }
 
     const playerId = room.sessionTokens.get(sessionToken);
     if (!playerId) {
-      return { ok: false, error: 'Session is invalid or expired.' };
-    }
-
-    // Section 13: If player was removed after 3 missed turns, they cannot rejoin the ongoing game
-    if (room.removedPlayerIds.has(playerId) && room.status === 'playing') {
-      return { ok: true, room, playerId, removedFromOngoingGame: true };
+      return { ok: false, error: 'Session is invalid or expired.', code: 'SESSION_INVALID' };
     }
 
     const seat = room.seats.find((s) => s.playerId === playerId);
-    if (seat) {
-      seat.connected = true;
+    if (!seat) {
+      return { ok: false, error: 'Session is invalid or expired.', code: 'SESSION_INVALID' };
     }
+
+    this.touchRoom(room);
+
+    // Section 13: If player was removed after 3 missed turns, they cannot rejoin the ongoing game,
+    // but we STILL restore seat.connected = true so they receive state updates and are eligible for rematch!
+    if (room.removedPlayerIds.has(playerId) && room.status === 'playing') {
+      seat.connected = true;
+      this.sink.onRoomUpdated(room);
+      return { ok: true, room, playerId, removedFromOngoingGame: true };
+    }
+
+    seat.connected = true;
 
     if (room.gameState) {
       room.gameState = markPlayerConnection(room.gameState, playerId, true);
+    }
+
+    // AUD-002: If a Timer-Off room scheduled the 15s disconnected fallback for this player's turn,
+    // cancel it cleanly upon reconnection so Timer-Off behavior is restored without a surprise timeout.
+    if (
+      room.status === 'playing' &&
+      room.gameState?.phase === 'playing' &&
+      room.gameState.currentTurnPlayerId === playerId &&
+      room.turnTimerSeconds === 0 &&
+      room.turnTimer
+    ) {
+      clearTimeout(room.turnTimer);
+      room.turnTimer = undefined;
+      room.turnDeadlineAt = null;
     }
 
     // Section 19: If original host reconnects before removal, restore host ownership!
@@ -413,6 +676,7 @@ export class RoomManager {
       room.hostPlayerId = playerId;
       room.suspendedHostId = null;
       room.aiHostActive = false;
+      this.cancelAiStartTimer(room);
       this.emitNote(
         room,
         'success',
@@ -422,13 +686,32 @@ export class RoomManager {
       this.emitNote(
         room,
         'info',
-        `${seat?.name ?? 'Host'} reconnected and resumed host ownership.`
+        `${seat.name} reconnected and resumed host ownership.`
       );
-    } else if (seat) {
+    } else {
       this.emitNote(room, 'info', `${seat.name} reconnected.`);
     }
 
+    // AUD-005: If reconnecting during an unexpired rematch window where they were marked declined
+    // due to disconnect, restore them to pending so they can respond before the window expires.
+    if (room.status === 'finished' && room.rematch && Date.now() <= room.rematch.expiresAt) {
+      if (
+        !(playerId in room.rematch.votes) ||
+        room.rematch.votes[playerId] === 'declined'
+      ) {
+        room.rematch.votes[playerId] = 'pending';
+      }
+      this.syncRematchVotesWithSeats(room);
+    }
+
     this.sink.onRoomUpdated(room);
+
+    // AUD-012: If a guest reconnects to an already-full waiting room managed by AI Room Host
+    // (e.g. after all humans had briefly disconnected), resume AI Room Host auto-start cleanly.
+    if (room.status === 'waiting' && room.aiHostActive && room.seats.length === room.capacity) {
+      this.maybeTriggerAiHostAutoStart(room);
+    }
+
     return { ok: true, room, playerId, removedFromOngoingGame: false };
   }
 
@@ -444,6 +727,14 @@ export class RoomManager {
     if (!seat || !seat.connected) return;
 
     seat.connected = false;
+    this.touchRoom(room);
+
+    // If player was already removed from ongoing game and was only spectating/waiting for rematch
+    if (room.removedPlayerIds.has(playerId) && room.status === 'playing') {
+      this.sink.onRoomUpdated(room);
+      return;
+    }
+
     if (room.gameState) {
       room.gameState = markPlayerConnection(room.gameState, playerId, false);
     }
@@ -467,18 +758,64 @@ export class RoomManager {
         'warning',
         `Host ${seat.name} disconnected. AI Room Host has temporarily taken over room management.`
       );
-    } else {
+    } else if (room.status === 'waiting') {
+      this.emitNote(room, 'warning', `${seat.name} disconnected from the lobby.`);
+    } else if (room.status === 'playing') {
       this.emitNote(room, 'warning', `${seat.name} disconnected. Game continues without pausing.`);
+    } else {
+      this.emitNote(room, 'warning', `${seat.name} disconnected.`);
+    }
+
+    // AUD-012: If zero connected humans remain in a waiting room, cancel any pending AI auto-start immediately
+    if (
+      room.status === 'waiting' &&
+      !room.seats.some((s) => s.type === 'human' && s.connected)
+    ) {
+      this.cancelAiStartTimer(room);
+    }
+
+    // AUD-005: Recalculate rematch eligibility when any player (including host) disconnects during rematch
+    if (room.status === 'finished' && room.rematch) {
+      this.syncRematchVotesWithSeats(room);
+      if (room.aiHostActive && !this.hasPendingRematchVotes(room)) {
+        this.finalizeRematchWindow(room);
+        return;
+      }
+      if (Date.now() > room.rematch.expiresAt && !room.rematch.readyToStart) {
+        room.rematch = null;
+      }
     }
 
     this.sink.onRoomUpdated(room);
+
+    // AUD-002: In Timer-Off rooms, schedule the 15s disconnected fallback immediately if the active
+    // turn player disconnects mid-turn so the game can never stall indefinitely.
+    if (
+      room.status === 'playing' &&
+      room.gameState?.phase === 'playing' &&
+      room.gameState.currentTurnPlayerId === playerId &&
+      room.turnTimerSeconds === 0 &&
+      !room.turnTimer
+    ) {
+      this.scheduleDisconnectedFallbackTurnTimer(room, playerId);
+    }
+
+    // If host dropped from an already-full waiting room, let AI Room Host auto-start it!
+    if (room.status === 'waiting' && room.aiHostActive && room.seats.length === room.capacity) {
+      this.maybeTriggerAiHostAutoStart(room);
+    }
   }
 
   /**
    * Voluntary departure before game starts (or after game finishes).
    * During an active game, use voluntaryExitInGame() instead!
    */
-  public leaveRoom(roomCode: string, playerId: string): { ok: true } | { ok: false; error: string } {
+  public leaveRoom(
+    roomCode: string,
+    playerId: string
+  ):
+    | { ok: true; reason?: 'left' | 'voluntary_exit' | 'finished_exit'; message?: string }
+    | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
     if (!room || room.status === 'closed') {
       return { ok: false, error: 'Room not found.' };
@@ -503,9 +840,8 @@ export class RoomManager {
     }
 
     // Remove session token for leaving player
-    for (const [tok, pid] of room.sessionTokens.entries()) {
-      if (pid === playerId) room.sessionTokens.delete(tok);
-    }
+    this.revokePlayerTokens(room, playerId);
+    this.touchRoom(room);
 
     const remainingHumans = room.seats.filter((s) => s.type === 'human');
 
@@ -527,6 +863,24 @@ export class RoomManager {
       );
     } else {
       this.emitNote(room, 'info', `${leaving.name} left the room.`);
+    }
+
+    // AUD-004 B: Remove departing player's vote from active rematch and reevaluate finalization
+    if (room.status === 'finished' && room.rematch) {
+      delete room.rematch.votes[playerId];
+      this.syncRematchVotesWithSeats(room);
+      if (room.aiHostActive && !this.hasPendingRematchVotes(room)) {
+        this.finalizeRematchWindow(room);
+        return { ok: true };
+      }
+      if (Date.now() > room.rematch.expiresAt && !room.rematch.readyToStart) {
+        room.rematch = null;
+      }
+    }
+
+    // AUD-012: Leaving a waiting room invalidates any pending AI auto-start countdown
+    if (room.status === 'waiting') {
+      this.cancelAiStartTimer(room);
     }
 
     // Section 18: Public room vacancy -> wait 2 minutes for replacement before closing
@@ -561,16 +915,20 @@ export class RoomManager {
     if (!room || room.status !== 'waiting') {
       return { ok: false, error: 'Bots can only be added while waiting in the lobby.' };
     }
-    if (room.hostPlayerId !== requesterId) {
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can add bots.' };
     }
     if (room.seats.length >= room.capacity) {
       return { ok: false, error: 'Room Full — cannot add more players.' };
     }
 
-    const usedNames = new Set(room.seats.map((s) => s.name));
-    const botName =
-      BOT_NAMES.find((n) => !usedNames.has(n)) ?? `Bot ${room.seats.length + 1}`;
+    const usedNamesLower = new Set(room.seats.map((s) => s.name.trim().toLowerCase()));
+    let botName = BOT_NAMES.find((n) => !usedNamesLower.has(n.toLowerCase()));
+    if (!botName) {
+      let idx = room.seats.length + 1;
+      while (usedNamesLower.has(`bot ${idx}`)) idx += 1;
+      botName = `Bot ${idx}`;
+    }
     const botId = `bot_${crypto.randomBytes(4).toString('hex')}`;
 
     room.seats.push({
@@ -581,6 +939,7 @@ export class RoomManager {
       avatarColor: AVATAR_COLORS[room.seats.length % AVATAR_COLORS.length],
       joinedAt: Date.now(),
     });
+    this.touchRoom(room);
 
     if (room.vacancyTimer && room.seats.length >= room.capacity) {
       clearTimeout(room.vacancyTimer);
@@ -597,12 +956,12 @@ export class RoomManager {
     roomCode: string,
     requesterId: string,
     targetPlayerId: string
-  ): { ok: true } | { ok: false; error: string } {
+  ): { ok: true; kickedPlayerId: string; wasHuman: boolean } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
     if (!room || room.status !== 'waiting') {
       return { ok: false, error: 'Players can only be removed before the game starts.' };
     }
-    if (room.hostPlayerId !== requesterId) {
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can remove players from the lobby.' };
     }
     if (targetPlayerId === requesterId) {
@@ -613,29 +972,63 @@ export class RoomManager {
     if (idx === -1) return { ok: false, error: 'Player not found in lobby.' };
 
     const [removed] = room.seats.splice(idx, 1);
-    for (const [tok, pid] of room.sessionTokens.entries()) {
-      if (pid === targetPlayerId) room.sessionTokens.delete(tok);
+    this.revokePlayerTokens(room, targetPlayerId);
+    this.cancelAiStartTimer(room);
+    this.touchRoom(room);
+
+    if (
+      room.pendingHostTransfer &&
+      (room.pendingHostTransfer.fromPlayerId === targetPlayerId ||
+        room.pendingHostTransfer.toPlayerId === targetPlayerId)
+    ) {
+      room.pendingHostTransfer = null;
+    }
+
+    if (removed.type === 'human') {
+      this.sink.onPlayerKicked?.(
+        room.roomCode,
+        targetPlayerId,
+        'You were removed from the lobby by the host.'
+      );
     }
 
     this.emitNote(room, 'info', `${removed.name} was removed from the lobby.`);
     this.sink.onRoomUpdated(room);
-    return { ok: true };
+    return { ok: true, kickedPlayerId: targetPlayerId, wasHuman: removed.type === 'human' };
   }
 
   public updateTurnTimer(
     roomCode: string,
     requesterId: string,
-    turnTimerSeconds: TurnTimerSeconds
+    turnTimerSeconds: unknown
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
-    if (!room) return { ok: false, error: 'Room not found.' };
-    if (room.hostPlayerId !== requesterId) {
+    if (!room || room.status === 'closed') return { ok: false, error: 'Room not found.' };
+    if (room.status !== 'waiting') {
+      return {
+        ok: false,
+        error: 'Turn timer can only be changed while waiting in the lobby.',
+      };
+    }
+    const authorized =
+      this.isConnectedHost(room, requesterId) ||
+      (requesterId === 'AI_ROOM_HOST' && room.aiHostActive);
+    if (!authorized) {
       return { ok: false, error: 'Only the host can change the room timer.' };
     }
-    if (![0, 10, 15, 20, 30].includes(turnTimerSeconds)) {
-      return { ok: false, error: 'Invalid turn timer option.' };
+    if (!isValidTurnTimerSeconds(turnTimerSeconds)) {
+      return {
+        ok: false,
+        error: 'Invalid turn timer option. Allowed values: Off (0s), 10s, 15s, 20s, or 30s.',
+      };
+    }
+    if (room.turnTimerSeconds === turnTimerSeconds) {
+      return { ok: true };
     }
     room.turnTimerSeconds = turnTimerSeconds;
+    this.touchRoom(room);
+    const label = turnTimerSeconds === 0 ? 'Off' : `${turnTimerSeconds}s`;
+    this.emitNote(room, 'info', `Turn timer updated to ${label}.`);
     this.sink.onRoomUpdated(room);
     return { ok: true };
   }
@@ -649,12 +1042,16 @@ export class RoomManager {
   ): { ok: true; newInviteToken: string } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
     if (!room || room.status === 'closed') return { ok: false, error: 'Room not found.' };
-    if (room.hostPlayerId !== requesterId) {
+    if (room.status !== 'waiting') {
+      return { ok: false, error: 'Invitation links can only be changed while waiting in the lobby.' };
+    }
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can revoke invitation links.' };
     }
 
     room.revokedTokens.add(room.inviteToken);
     room.inviteToken = this.generateToken();
+    this.touchRoom(room);
 
     this.emitNote(
       room,
@@ -677,16 +1074,20 @@ export class RoomManager {
     if (!room || room.status !== 'waiting') {
       return { ok: false, error: 'Room code can only be changed before the game starts.' };
     }
-    if (room.hostPlayerId !== requesterId) {
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can regenerate the room code.' };
     }
 
     const oldCode = room.roomCode;
     const newCode = this.generateCode();
     this.rooms.delete(oldCode);
-    this.expiredRoomCodes.add(oldCode);
+    this.recordExpiredCode(oldCode);
     room.roomCode = newCode;
     this.rooms.set(newCode, room);
+    this.touchRoom(room);
+
+    // AUD-001: Synchronize connected socket roomCode metadata BEFORE emitting notifications/room_state
+    this.sink.onRoomCodeChanged?.(oldCode, newCode, room);
 
     this.emitNote(room, 'info', `Room code updated to ${newCode}.`);
     this.sink.onRoomUpdated(room);
@@ -703,7 +1104,7 @@ export class RoomManager {
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
     if (!room || room.status === 'closed') return { ok: false, error: 'Room not found.' };
-    if (room.hostPlayerId !== requesterId) {
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the current connected host can transfer ownership.' };
     }
     if (targetPlayerId === requesterId) {
@@ -715,6 +1116,13 @@ export class RoomManager {
     if (!fromSeat || !toSeat || toSeat.type !== 'human' || !toSeat.connected) {
       return { ok: false, error: 'Target must be a connected human player.' };
     }
+    if (
+      room.pendingHostTransfer &&
+      room.pendingHostTransfer.toPlayerId === targetPlayerId &&
+      room.pendingHostTransfer.fromPlayerId === requesterId
+    ) {
+      return { ok: false, error: `A host transfer request to ${toSeat.name} is already pending.` };
+    }
 
     room.pendingHostTransfer = {
       fromPlayerId: fromSeat.playerId,
@@ -723,6 +1131,7 @@ export class RoomManager {
       toPlayerName: toSeat.name,
       requestedAt: Date.now(),
     };
+    this.touchRoom(room);
 
     this.emitNote(
       room,
@@ -740,20 +1149,27 @@ export class RoomManager {
     accept: boolean
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
-    if (!room || !room.pendingHostTransfer) {
+    if (!room || room.status === 'closed' || !room.pendingHostTransfer) {
       return { ok: false, error: 'No pending host transfer request.' };
     }
     if (room.pendingHostTransfer.toPlayerId !== responderId) {
       return { ok: false, error: 'This transfer request is not addressed to you.' };
     }
+    const responderSeat = room.seats.find((s) => s.playerId === responderId);
+    if (!responderSeat || responderSeat.type !== 'human' || !responderSeat.connected) {
+      room.pendingHostTransfer = null;
+      return { ok: false, error: 'You must be connected in this room to respond.' };
+    }
 
     const req = room.pendingHostTransfer;
     room.pendingHostTransfer = null;
+    this.touchRoom(room);
 
     if (accept) {
       room.hostPlayerId = responderId;
       room.aiHostActive = false;
       room.suspendedHostId = null;
+      this.cancelAiStartTimer(room);
       this.emitNote(room, 'success', `Host ownership transferred to ${req.toPlayerName}.`);
     } else {
       this.emitNote(
@@ -773,8 +1189,8 @@ export class RoomManager {
     requesterId: string
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
-    if (!room) return { ok: false, error: 'Room not found.' };
-    if (room.hostPlayerId !== requesterId) {
+    if (!room || room.status === 'closed') return { ok: false, error: 'Room not found.' };
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can cancel this room.' };
     }
     if (room.status === 'playing') {
@@ -790,18 +1206,27 @@ export class RoomManager {
     room.closeReason = reason;
     const memberIds = room.seats.map((s) => s.playerId);
     this.rooms.delete(room.roomCode);
-    this.expiredRoomCodes.add(room.roomCode);
+    this.recordExpiredCode(room.roomCode);
     this.sink.onRoomClosed(room.roomCode, reason, memberIds);
   }
 
   private maybeTriggerAiHostAutoStart(room: InternalRoom): void {
     if (!room.aiHostActive || room.status !== 'waiting') return;
     if (room.seats.length !== room.capacity) return;
+    // Do not auto-start an empty room with zero connected human players
+    if (!room.seats.some((s) => s.type === 'human' && s.connected)) return;
+    // AUD-012: Guard against duplicate auto-start timers & duplicate notifications
+    if (room.aiStartTimer) return;
 
-    if (room.aiStartTimer) clearTimeout(room.aiStartTimer);
     this.emitNote(room, 'info', 'Room is full! AI Room Host is starting the game...');
     room.aiStartTimer = setTimeout(() => {
-      if (room.status === 'waiting' && room.seats.length === room.capacity) {
+      room.aiStartTimer = undefined;
+      if (
+        room.aiHostActive &&
+        room.status === 'waiting' &&
+        room.seats.length === room.capacity &&
+        room.seats.some((s) => s.type === 'human' && s.connected)
+      ) {
         this.startGameInternal(room);
       }
     }, this.opts.aiAutoStartDelayMs);
@@ -815,7 +1240,7 @@ export class RoomManager {
     if (!room || room.status !== 'waiting') {
       return { ok: false, error: 'Room is not ready to start.' };
     }
-    if (room.hostPlayerId !== requesterId) {
+    if (!this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can start the game.' };
     }
     // Section 16: Room starts only when its required number of players is present
@@ -831,6 +1256,7 @@ export class RoomManager {
   }
 
   private startGameInternal(room: InternalRoom, activeSeats?: RoomSeat[]): void {
+    this.cancelAiStartTimer(room);
     if (room.vacancyTimer) {
       clearTimeout(room.vacancyTimer);
       room.vacancyTimer = undefined;
@@ -842,11 +1268,43 @@ export class RoomManager {
     }
 
     const seatsToPlay = activeSeats ?? room.seats;
+    const acceptedIds = new Set(seatsToPlay.map((s) => s.playerId));
+    const excludedSeats = room.seats.filter((s) => !acceptedIds.has(s.playerId));
+
+    // AUD-003: Revoke tokens and detach players excluded from a smaller-group rematch
+    for (const excluded of excludedSeats) {
+      this.revokePlayerTokens(room, excluded.playerId);
+      if (
+        room.pendingHostTransfer &&
+        (room.pendingHostTransfer.fromPlayerId === excluded.playerId ||
+          room.pendingHostTransfer.toPlayerId === excluded.playerId)
+      ) {
+        room.pendingHostTransfer = null;
+      }
+      if (room.hostPlayerId === excluded.playerId || room.suspendedHostId === excluded.playerId) {
+        room.hostPlayerId = null;
+        room.suspendedHostId = null;
+        room.aiHostActive = true;
+      }
+    }
+
     room.seats = seatsToPlay;
     room.capacity = seatsToPlay.length;
     room.removedPlayerIds.clear();
     room.rematch = null;
     room.status = 'playing';
+    room.finishedAt = null;
+    this.touchRoom(room);
+
+    for (const excluded of excludedSeats) {
+      if (excluded.type === 'human') {
+        this.sink.onPlayerDetached?.(
+          room.roomCode,
+          excluded.playerId,
+          'A rematch started without you.'
+        );
+      }
+    }
 
     const playerConfigs: PlayerConfig[] = seatsToPlay.map((s) => ({
       id: s.playerId,
@@ -855,7 +1313,10 @@ export class RoomManager {
       avatarColor: s.avatarColor,
     }));
 
-    room.gameState = createInitialGameState(playerConfigs, { rng: this.opts.rng });
+    room.gameState = createInitialGameState(playerConfigs, {
+      rng: this.opts.rng,
+      difficulty: room.difficulty,
+    });
     // Sync connection status into fresh GameState
     for (const s of seatsToPlay) {
       if (!s.connected) {
@@ -886,20 +1347,98 @@ export class RoomManager {
 
     this.clearTurnAndBotTimers(room);
     room.gameState = res.state;
+    this.touchRoom(room);
     this.handlePostStateTransition(room);
     return { ok: true };
   }
 
   /**
-   * Section 10: Voluntary Exit between tricks only.
+   * Section 10: Voluntary Exit between tricks for active players,
+   * OR immediate clean exit for officially finished (or already removed) players without altering game state.
    */
   public voluntaryExitInGame(
     roomCode: string,
     playerId: string
-  ): { ok: true } | { ok: false; error: string } {
+  ):
+    | { ok: true; reason: 'voluntary_exit' | 'finished_exit'; message: string }
+    | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
     if (!room || room.status !== 'playing' || !room.gameState) {
       return { ok: false, error: 'No active game.' };
+    }
+
+    const gamePlayer = room.gameState.players.find((p) => p.id === playerId);
+    const seatIdx = room.seats.findIndex((s) => s.playerId === playerId);
+    const seat = seatIdx >= 0 ? room.seats[seatIdx] : undefined;
+
+    // Officially finished players (or players already removed after 3 missed turns)
+    // may leave at any time without affecting remaining players, cards, or game state.
+    if (
+      gamePlayer &&
+      ((gamePlayer.finished && gamePlayer.hand.length === 0 && !gamePlayer.removed) ||
+        gamePlayer.removed)
+    ) {
+      const wasFinished = gamePlayer.finished && !gamePlayer.removed;
+      const playerName = seat?.name ?? gamePlayer.name;
+
+      // Detach their seat and revoke session token so they don't linger in rematch/reconnect
+      if (seatIdx >= 0) {
+        room.seats.splice(seatIdx, 1);
+      }
+      this.revokePlayerTokens(room, playerId);
+      this.touchRoom(room);
+
+      if (
+        room.pendingHostTransfer &&
+        (room.pendingHostTransfer.fromPlayerId === playerId ||
+          room.pendingHostTransfer.toPlayerId === playerId)
+      ) {
+        room.pendingHostTransfer = null;
+      }
+
+      // Mark connection false in gameState without altering finished/finishOrder/cards/trick/turn
+      room.gameState = markPlayerConnection(room.gameState, playerId, false);
+
+      // AUD-013: Close ghost bot-only rooms if zero human seats remain (disconnected humans still keep room alive)
+      const remainingHumans = room.seats.filter((s) => s.type === 'human');
+      if (remainingHumans.length === 0) {
+        this.closeRoom(room, 'All human players left the game.');
+        return {
+          ok: true,
+          reason: 'finished_exit',
+          message: wasFinished
+            ? 'You left the table. Your finishing position is preserved.'
+            : 'You left the room.',
+        };
+      }
+
+      if (room.hostPlayerId === playerId || room.suspendedHostId === playerId) {
+        room.hostPlayerId = null;
+        room.suspendedHostId = null;
+        room.aiHostActive = true;
+        this.emitNote(
+          room,
+          'info',
+          `${playerName} left the table. AI Room Host now manages the room.`
+        );
+      } else {
+        this.emitNote(
+          room,
+          'info',
+          wasFinished
+            ? `${playerName} finished and left the table. The game continues.`
+            : `${playerName} left the room.`
+        );
+      }
+
+      this.sink.onRoomUpdated(room);
+      return {
+        ok: true,
+        reason: 'finished_exit',
+        message: wasFinished
+          ? 'You left the table. Your finishing position is preserved while remaining players finish.'
+          : 'You left the room.',
+      };
     }
 
     if (!canVoluntarilyExit(room.gameState)) {
@@ -920,9 +1459,31 @@ export class RoomManager {
     this.clearTurnAndBotTimers(room);
     room.gameState = res.state;
     room.removedPlayerIds.add(playerId);
+    this.revokePlayerTokens(room, playerId);
+    this.touchRoom(room);
 
-    const seat = room.seats.find((s) => s.playerId === playerId);
-    if (seat) seat.connected = false;
+    if (seatIdx >= 0) {
+      room.seats.splice(seatIdx, 1);
+    }
+
+    if (
+      room.pendingHostTransfer &&
+      (room.pendingHostTransfer.fromPlayerId === playerId ||
+        room.pendingHostTransfer.toPlayerId === playerId)
+    ) {
+      room.pendingHostTransfer = null;
+    }
+
+    // AUD-013: Close ghost bot-only rooms if zero human seats remain (disconnected humans still keep room alive)
+    const remainingHumans = room.seats.filter((s) => s.type === 'human');
+    if (remainingHumans.length === 0) {
+      this.closeRoom(room, 'All human players left the game.');
+      return {
+        ok: true,
+        reason: 'voluntary_exit',
+        message: 'Exited game between tricks.',
+      };
+    }
 
     // Voluntary host departure -> AI Room Host takes over permanently
     if (room.hostPlayerId === playerId || room.suspendedHostId === playerId) {
@@ -946,7 +1507,13 @@ export class RoomManager {
     }
 
     this.handlePostStateTransition(room);
-    return { ok: true };
+    return {
+      ok: true,
+      reason: 'voluntary_exit',
+      message: redist
+        ? `Exited between tricks. ${redist.cardsDistributedCount} cards redistributed clockwise.`
+        : 'Exited game between tricks.',
+    };
   }
 
   private clearTurnAndBotTimers(room: InternalRoom): void {
@@ -959,6 +1526,7 @@ export class RoomManager {
 
   private handlePostStateTransition(room: InternalRoom): void {
     if (!room.gameState) return;
+    this.touchRoom(room);
 
     if (room.gameState.phase === 'finished') {
       this.clearTurnAndBotTimers(room);
@@ -967,6 +1535,7 @@ export class RoomManager {
         room.trickTimer = undefined;
       }
       room.status = 'finished';
+      room.finishedAt = Date.now();
       const donkey = room.gameState.players.find((p) => p.id === room.gameState?.donkeyPlayerId);
       this.emitNote(
         room,
@@ -1008,12 +1577,17 @@ export class RoomManager {
     const currentPlayer = room.gameState.players.find((p) => p.id === turnId);
     if (!currentPlayer) return;
 
-    // Bot turn -> random legal play
+    // Bot turn -> routes strictly through sanitized BotPublicObservation for room.difficulty
     if (currentPlayer.type === 'bot') {
       room.botTimer = setTimeout(() => {
         if (!room.gameState || room.gameState.phase !== 'playing') return;
         if (room.gameState.currentTurnPlayerId !== currentPlayer.id) return;
-        const card = chooseRandomLegalCard(room.gameState, currentPlayer.id, this.opts.rng);
+        const card = chooseBotCard(
+          room.gameState,
+          currentPlayer.id,
+          room.difficulty,
+          this.opts.rng
+        );
         if (!card) return;
         const res = playCard(room.gameState, currentPlayer.id, card.id, { isAutoPlay: true });
         if (res.ok) {
@@ -1030,7 +1604,7 @@ export class RoomManager {
       room.turnTimerSeconds > 0
         ? room.turnTimerSeconds
         : !currentPlayer.connected
-          ? 15
+          ? this.opts.disconnectedFallbackTimerSeconds
           : 0;
 
     if (effectiveSeconds > 0) {
@@ -1043,7 +1617,23 @@ export class RoomManager {
     }
   }
 
+  private scheduleDisconnectedFallbackTurnTimer(room: InternalRoom, playerId: string): void {
+    // Guard against duplicate fallback timers
+    if (room.turnTimer) return;
+    const fallbackSeconds = this.opts.disconnectedFallbackTimerSeconds;
+    if (fallbackSeconds <= 0) return;
+
+    room.turnDeadlineAt = Date.now() + fallbackSeconds * 1000;
+    this.sink.onRoomUpdated(room);
+
+    room.turnTimer = setTimeout(() => {
+      this.executeMissedTurnTimeout(room, playerId);
+    }, fallbackSeconds * 1000);
+  }
+
   public executeMissedTurnTimeout(room: InternalRoom, playerId: string): void {
+    room.turnTimer = undefined;
+    room.turnDeadlineAt = null;
     if (!room.gameState || room.gameState.phase !== 'playing') return;
     if (room.gameState.currentTurnPlayerId !== playerId) return;
 
@@ -1083,6 +1673,40 @@ export class RoomManager {
   // SECTION 20: REMATCH SYSTEM (30-SECOND RESPONSE WINDOW)
   // =========================================================================
 
+  private getEligibleRematchSeats(room: InternalRoom): RoomSeat[] {
+    return room.seats.filter((s) => s.type === 'bot' || s.connected);
+  }
+
+  private getAcceptedEligibleRematchSeats(room: InternalRoom): RoomSeat[] {
+    if (!room.rematch) return [];
+    return room.seats.filter(
+      (s) => (s.type === 'bot' || s.connected) && room.rematch?.votes[s.playerId] === 'accepted'
+    );
+  }
+
+  private syncRematchVotesWithSeats(room: InternalRoom): void {
+    if (!room.rematch) return;
+    const currentSeatIds = new Set(room.seats.map((s) => s.playerId));
+    for (const pid of Object.keys(room.rematch.votes)) {
+      if (!currentSeatIds.has(pid)) {
+        delete room.rematch.votes[pid];
+      }
+    }
+    for (const seat of room.seats) {
+      if (seat.type === 'human' && !seat.connected) {
+        room.rematch.votes[seat.playerId] = 'declined';
+      }
+    }
+    room.rematch.readyToStart = this.getAcceptedEligibleRematchSeats(room).length >= 2;
+  }
+
+  private hasPendingRematchVotes(room: InternalRoom): boolean {
+    if (!room.rematch) return false;
+    return room.seats.some(
+      (s) => s.type === 'human' && s.connected && room.rematch?.votes[s.playerId] === 'pending'
+    );
+  }
+
   public requestRematch(
     roomCode: string,
     requesterId: string
@@ -1091,11 +1715,23 @@ export class RoomManager {
     if (!room || room.status !== 'finished') {
       return { ok: false, error: 'Rematch is only available after a game ends.' };
     }
+    const requesterSeat = room.seats.find((s) => s.playerId === requesterId);
     const isAuthorized =
-      room.hostPlayerId === requesterId ||
-      (room.aiHostActive && room.seats.some((s) => s.playerId === requesterId));
+      this.isConnectedHost(room, requesterId) ||
+      (room.aiHostActive && Boolean(requesterSeat && requesterSeat.connected));
     if (!isAuthorized) {
       return { ok: false, error: 'Only the host can start a rematch.' };
+    }
+
+    // AUD-004 C: Prevent overlapping active rematch windows
+    if (room.rematch && room.rematch.expiresAt > Date.now()) {
+      return { ok: false, error: 'A rematch vote is already in progress.' };
+    }
+
+    // AUD-004 C: Require at least 2 eligible seats before initiating a rematch
+    const eligibleSeats = this.getEligibleRematchSeats(room);
+    if (eligibleSeats.length < 2) {
+      return { ok: false, error: 'At least 2 eligible players are required to start a rematch.' };
     }
 
     const votes: Record<string, RematchState['votes'][string]> = {};
@@ -1115,8 +1751,10 @@ export class RoomManager {
       initiatedBy: room.aiHostActive ? 'AI_ROOM_HOST' : requesterId,
       expiresAt: Date.now() + this.opts.rematchTimeoutMs,
       votes,
-      readyToStart: this.countAcceptedRematch(votes) >= 2,
+      readyToStart: false,
     };
+    this.syncRematchVotesWithSeats(room);
+    this.touchRoom(room);
 
     this.emitNote(
       room,
@@ -1130,9 +1768,8 @@ export class RoomManager {
       this.finalizeRematchWindow(room);
     }, this.opts.rematchTimeoutMs);
 
-    // If all human players already voted (e.g. solo host + bots), evaluate immediately
-    const anyPending = Object.values(votes).some((v) => v === 'pending');
-    if (!anyPending && room.aiHostActive) {
+    // If all connected human players already voted (e.g. solo host + bots under AI Host), evaluate immediately
+    if (!this.hasPendingRematchVotes(room) && room.aiHostActive) {
       this.finalizeRematchWindow(room);
     }
 
@@ -1145,26 +1782,33 @@ export class RoomManager {
     accept: boolean
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
-    if (!room || !room.rematch) {
+    if (!room || room.status !== 'finished' || !room.rematch) {
       return { ok: false, error: 'No active rematch invitation.' };
     }
-    if (!(playerId in room.rematch.votes)) {
+    // AUD-004 D: Reject votes submitted after rematch window expiration
+    if (Date.now() > room.rematch.expiresAt) {
+      return { ok: false, error: 'The rematch response window has expired.' };
+    }
+    const seat = room.seats.find((s) => s.playerId === playerId);
+    if (!seat || !(playerId in room.rematch.votes)) {
       return { ok: false, error: 'You are not part of this rematch.' };
     }
+    if (seat.type === 'human' && !seat.connected) {
+      return { ok: false, error: 'Reconnect to respond to the rematch invitation.' };
+    }
 
-    const seat = room.seats.find((s) => s.playerId === playerId);
     room.rematch.votes[playerId] = accept ? 'accepted' : 'declined';
-    room.rematch.readyToStart = this.countAcceptedRematch(room.rematch.votes) >= 2;
+    this.syncRematchVotesWithSeats(room);
+    this.touchRoom(room);
 
     this.emitNote(
       room,
       accept ? 'success' : 'info',
-      `${seat?.name ?? 'Player'} ${accept ? 'accepted' : 'declined'} the rematch.`
+      `${seat.name} ${accept ? 'accepted' : 'declined'} the rematch.`
     );
     this.sink.onRoomUpdated(room);
 
-    const anyPending = Object.values(room.rematch.votes).some((v) => v === 'pending');
-    if (!anyPending && room.aiHostActive) {
+    if (!this.hasPendingRematchVotes(room) && room.aiHostActive) {
       this.finalizeRematchWindow(room);
     }
 
@@ -1176,14 +1820,21 @@ export class RoomManager {
     requesterId: string
   ): { ok: true } | { ok: false; error: string } {
     const room = this.rooms.get(roomCode);
-    if (!room || !room.rematch) {
+    if (!room || room.status !== 'finished' || !room.rematch) {
       return { ok: false, error: 'No rematch in progress.' };
     }
-    if (!room.aiHostActive && room.hostPlayerId !== requesterId) {
+    if (!room.aiHostActive && !this.isConnectedHost(room, requesterId)) {
       return { ok: false, error: 'Only the host can start the rematch.' };
     }
+    if (
+      room.aiHostActive &&
+      !room.seats.some((s) => s.playerId === requesterId && s.connected)
+    ) {
+      return { ok: false, error: 'You must be connected in this room to start the rematch.' };
+    }
 
-    const acceptedSeats = room.seats.filter((s) => room.rematch?.votes[s.playerId] === 'accepted');
+    this.syncRematchVotesWithSeats(room);
+    const acceptedSeats = this.getAcceptedEligibleRematchSeats(room);
     if (acceptedSeats.length < 2) {
       return { ok: false, error: 'At least 2 accepted players are required to start a rematch.' };
     }
@@ -1199,42 +1850,43 @@ export class RoomManager {
       room.rematchTimer = undefined;
     }
 
-    // Mark all non-responders as declined
+    // Mark all non-responders as declined and reconcile with current connected seats
     for (const [pid, vote] of Object.entries(room.rematch.votes)) {
       if (vote === 'pending') {
         room.rematch.votes[pid] = 'declined';
       }
     }
+    this.syncRematchVotesWithSeats(room);
 
-    const acceptedSeats = room.seats.filter((s) => room.rematch?.votes[s.playerId] === 'accepted');
-    room.rematch.readyToStart = acceptedSeats.length >= 2;
+    const acceptedSeats = this.getAcceptedEligibleRematchSeats(room);
+
+    // AUD-004 A: Reset rematch to null when fewer than 2 eligible players accepted (both human & AI host)
+    if (acceptedSeats.length < 2) {
+      room.rematch = null;
+      this.emitNote(
+        room,
+        'warning',
+        'Not enough players accepted the rematch. You may request another rematch when ready.'
+      );
+      this.sink.onRoomUpdated(room);
+      return;
+    }
 
     if (room.aiHostActive) {
-      if (acceptedSeats.length >= 2) {
-        this.emitNote(
-          room,
-          'success',
-          `AI Room Host starting rematch with ${acceptedSeats.length} players.`
-        );
-        this.startGameInternal(room, acceptedSeats);
-      } else {
-        room.rematch = null;
-        this.emitNote(room, 'warning', 'Not enough players accepted the rematch.');
-        this.sink.onRoomUpdated(room);
-      }
+      this.emitNote(
+        room,
+        'success',
+        `AI Room Host starting rematch with ${acceptedSeats.length} players.`
+      );
+      this.startGameInternal(room, acceptedSeats);
     } else {
+      room.rematch.readyToStart = true;
       this.emitNote(
         room,
         'info',
-        acceptedSeats.length >= 2
-          ? `Rematch timer finished — ${acceptedSeats.length} players ready. Host may start now.`
-          : 'Rematch timer finished with fewer than 2 accepted players.'
+        `Rematch timer finished — ${acceptedSeats.length} players ready. Host may start now.`
       );
       this.sink.onRoomUpdated(room);
     }
-  }
-
-  private countAcceptedRematch(votes: Record<string, RematchState['votes'][string]>): number {
-    return Object.values(votes).filter((v) => v === 'accepted').length;
   }
 }

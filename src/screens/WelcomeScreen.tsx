@@ -1,18 +1,21 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Bot,
+  Clock,
   Globe,
   HelpCircle,
   Lock,
   Plus,
   RefreshCw,
   Settings,
+  User,
   Users,
 } from 'lucide-react';
 import { PlayingCard } from '../components/PlayingCard';
 import { PWAInstallButton } from '../components/PWAInstallButton';
-import { makeCard } from '../engine';
-import { fetchPublicRooms, validateRoomInvite } from '../lib/multiplayerClient';
+import { DIFFICULTY_META, makeCard } from '../engine';
+import { fetchPublicRoomsResult, validateRoomInvite } from '../lib/multiplayerClient';
 import type { PublicRoomSummary } from '../server/roomTypes';
 
 interface WelcomeScreenProps {
@@ -60,13 +63,29 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   const [joinError, setJoinError] = useState<string | null>(null);
   const [inviteInfo, setInviteInfo] = useState<string | null>(null);
   const [publicRooms, setPublicRooms] = useState<PublicRoomSummary[]>([]);
-  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [loadingRooms, setLoadingRooms] = useState(true);
+  const [hasLoadedRooms, setHasLoadedRooms] = useState(false);
+  const [roomsError, setRoomsError] = useState<string | null>(null);
+  const [publicJoinError, setPublicJoinError] = useState<string | null>(null);
+  const [joiningRoomCode, setJoiningRoomCode] = useState<string | null>(null);
   const [capacityFilter, setCapacityFilter] = useState<number | 'all'>('all');
+  const [openOnlyFilter, setOpenOnlyFilter] = useState(false);
+
+  const inFlightRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (incomingInvite?.roomCode) {
       setRoomCode(incomingInvite.roomCode);
       validateRoomInvite(incomingInvite.roomCode, incomingInvite.inviteToken).then((res) => {
+        if (!mountedRef.current) return;
         if (res.ok) {
           setJoinError(null);
           setInviteInfo(
@@ -80,18 +99,51 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     }
   }, [incomingInvite]);
 
-  const loadPublic = async () => {
+  const loadPublic = useCallback(async (options: { force?: boolean } = {}) => {
+    if (inFlightRef.current && !options.force) return;
+    inFlightRef.current = true;
     setLoadingRooms(true);
-    const list = await fetchPublicRooms();
-    setPublicRooms(list);
+    const result = await fetchPublicRoomsResult();
+    inFlightRef.current = false;
+    if (!mountedRef.current) return;
     setLoadingRooms(false);
-  };
+    setHasLoadedRooms(true);
+    if (result.ok) {
+      setPublicRooms(result.rooms);
+      setRoomsError(null);
+    } else if (result.error) {
+      setRoomsError(result.error);
+    }
+  }, []);
 
   useEffect(() => {
-    loadPublic();
-    const interval = window.setInterval(loadPublic, 8000);
-    return () => window.clearInterval(interval);
-  }, []);
+    loadPublic({ force: true });
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadPublic();
+      }
+    }, 15_000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        loadPublic();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [loadPublic]);
+
+  // Refresh public list when a join error returns the user to the Welcome screen
+  useEffect(() => {
+    if (externalError) {
+      loadPublic();
+    }
+  }, [externalError, loadPublic]);
 
   const persistName = (value: string) => {
     setName(value);
@@ -108,6 +160,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       return;
     }
     setJoinError(null);
+    setPublicJoinError(null);
     onDismissError?.();
 
     const tokenToUse =
@@ -129,10 +182,37 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     });
   };
 
-  const filteredPublicRooms =
-    capacityFilter === 'all'
-      ? publicRooms
-      : publicRooms.filter((r) => r.capacity === capacityFilter);
+  const handleJoinPublicRoom = async (room: PublicRoomSummary) => {
+    if (!room.joinable || joiningRoomCode) return;
+    setPublicJoinError(null);
+    onDismissError?.();
+    setJoiningRoomCode(room.roomCode);
+
+    const check = await validateRoomInvite(room.roomCode);
+    if (!mountedRef.current) return;
+    setJoiningRoomCode(null);
+
+    if (!check.ok) {
+      setPublicJoinError(
+        `${room.tableName} (${room.roomCode}) is no longer available: ${check.error}`
+      );
+      loadPublic({ force: true });
+      return;
+    }
+
+    onClearIncomingInvite();
+    onJoinOnlineRoom({
+      roomCode: room.roomCode,
+      playerName: safeName(),
+    });
+  };
+
+  const openJoinableCount = publicRooms.filter((r) => r.joinable).length;
+  const filteredPublicRooms = publicRooms.filter((r) => {
+    if (capacityFilter !== 'all' && r.capacity !== capacityFilter) return false;
+    if (openOnlyFilter && !r.joinable) return false;
+    return true;
+  });
 
   return (
     <div className="min-h-screen cream-surface overflow-x-hidden flex flex-col">
@@ -286,14 +366,17 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
               Pass-and-Play on One Device
             </button>
 
-            {/* Beige Join Room Panel */}
+            {/* Beige Join Room Panel (Private / Code-Only) */}
             <form
               onSubmit={handleJoinSubmit}
               className="rounded-3xl bg-[#EFE6D8] border border-[#DFD3C1] p-5 space-y-3.5 shadow-sm"
             >
               <div className="flex items-center justify-between gap-2">
-                <h2 className="font-display text-lg font-bold text-[#261E18]">Join Room</h2>
-                <span className="text-xs text-[#6E6052]">6-character code</span>
+                <h2 className="font-display text-lg font-bold text-[#261E18] flex items-center gap-1.5">
+                  <Lock className="w-4 h-4 text-[#D95732] shrink-0" />
+                  Join by Code
+                </h2>
+                <span className="text-xs text-[#6E6052]">Private or 6-char code</span>
               </div>
 
               <div className="flex flex-col sm:flex-row gap-2.5">
@@ -328,108 +411,227 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           {/* Right / Public Rooms Discovery Column */}
           <section className="lg:col-span-6 w-full max-w-lg mx-auto lg:max-w-none rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-5 sm:p-6 shadow-sm">
             <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="font-display text-xl font-bold text-[#261E18] flex items-center gap-2">
-                  <Globe className="w-5 h-5 text-[#365B40]" />
-                  Public Rooms
+              <div className="min-w-0">
+                <h2 className="font-display text-xl font-bold text-[#261E18] flex items-center gap-2 flex-wrap">
+                  <Globe className="w-5 h-5 text-[#365B40] shrink-0" />
+                  <span>Public Rooms</span>
+                  {hasLoadedRooms && !roomsError && (
+                    <span className="text-xs font-sans font-semibold text-[#365B40] tabular-nums">
+                      ({openJoinableCount} open)
+                    </span>
+                  )}
                 </h2>
                 <p className="text-xs text-[#6E6052] mt-0.5">
-                  Join open tables directly · Private rooms require a code or invite link
+                  Open public tables only · Private rooms require a code or invite link
                 </p>
               </div>
               <button
                 type="button"
-                onClick={loadPublic}
+                onClick={() => loadPublic({ force: true })}
+                disabled={loadingRooms}
                 aria-label="Refresh public rooms"
-                className="min-h-[40px] min-w-[40px] rounded-xl bg-[#FAF5ED] border border-[#DDD1BE] flex items-center justify-center text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer"
+                className="min-h-[40px] min-w-[40px] rounded-xl bg-[#FAF5ED] border border-[#DDD1BE] flex items-center justify-center text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer disabled:opacity-60 shrink-0"
               >
                 <RefreshCw className={`w-4 h-4 ${loadingRooms ? 'animate-spin' : ''}`} />
               </button>
             </div>
 
-            {/* Room Capacity Filter Tabs (2P to 6P) */}
-            <div className="mt-4 flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-              {(['all', 2, 3, 4, 5, 6] as const).map((cap) => {
-                const active = capacityFilter === cap;
-                return (
-                  <button
-                    key={cap}
-                    type="button"
-                    onClick={() => setCapacityFilter(cap)}
-                    className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                      active
-                        ? 'bg-[#365B40] text-white'
-                        : 'bg-[#FAF5ED] text-[#4E4136] border border-[#DFD3C1] hover:border-[#365B40]'
-                    }`}
-                  >
-                    {cap === 'all' ? 'All Tables' : `${cap}-Player`}
-                  </button>
-                );
-              })}
+            {/* Room Capacity & Availability Filter Controls */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+                {(['all', 2, 3, 4, 5, 6] as const).map((cap) => {
+                  const active = capacityFilter === cap;
+                  return (
+                    <button
+                      key={cap}
+                      type="button"
+                      onClick={() => setCapacityFilter(cap)}
+                      className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        active
+                          ? 'bg-[#365B40] text-white'
+                          : 'bg-[#FAF5ED] text-[#4E4136] border border-[#DFD3C1] hover:border-[#365B40]'
+                      }`}
+                    >
+                      {cap === 'all' ? 'All Sizes' : `${cap}P`}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOpenOnlyFilter((prev) => !prev)}
+                aria-pressed={openOnlyFilter}
+                className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  openOnlyFilter
+                    ? 'bg-[#D95732] text-white'
+                    : 'bg-[#FAF5ED] text-[#4E4136] border border-[#DFD3C1] hover:border-[#D95732]'
+                }`}
+              >
+                {openOnlyFilter ? 'Open Seats Only' : 'Show All Status'}
+              </button>
             </div>
 
-            {/* Public Room List */}
+            {/* Graceful Join Error Banner (e.g., room filled, started, or closed before click) */}
+            {publicJoinError && (
+              <div
+                role="alert"
+                className="mt-3 rounded-2xl bg-[#FEECE8] border border-[#E59887] px-3.5 py-2.5 text-xs text-[#8F2811] flex items-center justify-between gap-2"
+              >
+                <span>{publicJoinError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPublicJoinError(null)}
+                  className="font-semibold underline shrink-0 cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Public Room List (Loading / Error / Empty / Rooms) */}
             <div className="mt-4 space-y-2.5">
-              {filteredPublicRooms.length === 0 ? (
-                <div className="rounded-2xl bg-[#FAF5ED] border border-dashed border-[#D8CBB8] px-4 py-8 text-center">
-                  <p className="text-sm font-semibold text-[#3A2E25]">
-                    No open public rooms right now
-                  </p>
-                  <p className="mt-1 text-xs text-[#736456]">
-                    Tap <strong>Create Room</strong> to host a public or private table for 2–6
-                    players, or jump straight into <strong>Practice vs Bots</strong>.
+              {!hasLoadedRooms && loadingRooms ? (
+                <div className="rounded-2xl bg-[#FAF5ED] border border-[#DFD3C1] px-4 py-8 text-center">
+                  <RefreshCw className="w-5 h-5 text-[#365B40] animate-spin mx-auto" />
+                  <p className="mt-2 text-sm font-semibold text-[#3A2E25]">
+                    Loading public rooms...
                   </p>
                 </div>
-              ) : (
-                filteredPublicRooms.map((room) => (
-                  <div
-                    key={room.roomCode}
-                    className="rounded-2xl bg-[#FAF5ED] border border-[#DFD3C1] p-4 flex items-center justify-between gap-3"
+              ) : roomsError ? (
+                <div
+                  role="alert"
+                  className="rounded-2xl bg-[#FEECE8] border border-[#E59887] px-4 py-6 text-center space-y-2.5"
+                >
+                  <AlertCircle className="w-5 h-5 text-[#B92D14] mx-auto" />
+                  <p className="text-sm font-semibold text-[#8F2811]">{roomsError}</p>
+                  <button
+                    type="button"
+                    onClick={() => loadPublic({ force: true })}
+                    className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#261E18] text-[#FAF5ED] text-xs font-semibold hover:bg-[#3B2F26] transition-colors cursor-pointer"
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm sm:text-base text-[#261E18] truncate">
-                          {room.tableName}
-                        </span>
-                        <span className="font-mono text-xs text-[#D95732] font-semibold shrink-0">
-                          {room.roomCode}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#6E6052] tabular-nums">
-                        <span>{room.capacity}-Player Room</span>
-                        <span aria-hidden="true">·</span>
-                        <span>
-                          {room.playerCount}/{room.capacity} seated
-                        </span>
-                        {room.aiHostActive && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span>AI Room Host</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {room.isFull ? (
-                      <span className="px-3.5 py-2 rounded-xl bg-[#EFE6D8] text-[#7D6E5F] text-xs font-semibold whitespace-nowrap shrink-0">
-                        Room Full
-                      </span>
+                    Try Again
+                  </button>
+                </div>
+              ) : filteredPublicRooms.length === 0 ? (
+                <div className="rounded-2xl bg-[#FAF5ED] border border-dashed border-[#D8CBB8] px-4 py-8 text-center space-y-2">
+                  <p className="text-sm font-semibold text-[#3A2E25]">
+                    {publicRooms.length === 0
+                      ? 'No public rooms right now'
+                      : 'No public rooms match this filter'}
+                  </p>
+                  <p className="text-xs text-[#736456]">
+                    {publicRooms.length === 0 ? (
+                      <>
+                        Tap <strong>Create Room</strong> to host a public or private table for 2–6
+                        players, or play <strong>Practice vs Bots</strong>.
+                      </>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onJoinOnlineRoom({
-                            roomCode: room.roomCode,
-                            playerName: safeName(),
-                          })
-                        }
-                        className="min-h-[42px] px-4 py-2 rounded-xl bg-[#D95732] text-white text-xs font-bold hover:bg-[#E3613B] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                      >
-                        Join
-                      </button>
+                      'Reset your filters to view other public rooms.'
                     )}
-                  </div>
-                ))
+                  </p>
+                  {publicRooms.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCapacityFilter('all');
+                        setOpenOnlyFilter(false);
+                      }}
+                      className="mt-1 min-h-[36px] px-3.5 py-1 rounded-xl bg-[#EFE6D8] border border-[#D8CBB8] text-xs font-semibold text-[#261E18] hover:border-[#D95732] cursor-pointer"
+                    >
+                      Show All Public Rooms
+                    </button>
+                  )}
+                </div>
+              ) : (
+                filteredPublicRooms.map((room) => {
+                  const isJoiningThis = joiningRoomCode === room.roomCode;
+                  const statusLabel =
+                    room.status === 'playing'
+                      ? 'In Progress'
+                      : room.isFull
+                        ? 'Full'
+                        : 'Waiting';
+                  const statusColorClass =
+                    room.status === 'playing'
+                      ? 'text-[#9A5B00] bg-[#FFF4DC] border-[#E7C67A]'
+                      : room.isFull
+                        ? 'text-[#6E6052] bg-[#EFE6D8] border-[#D8CBB8]'
+                        : 'text-[#1E4A2C] bg-[#EBF5EE] border-[#B2D3BC]';
+                  const timerLabel =
+                    room.turnTimerSeconds === 0 ? 'Timer Off' : `${room.turnTimerSeconds}s timer`;
+
+                  return (
+                    <div
+                      key={room.roomCode}
+                      className="rounded-2xl bg-[#FAF5ED] border border-[#DFD3C1] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-sm sm:text-base text-[#261E18] truncate max-w-full">
+                            {room.tableName}
+                          </span>
+                          <span className="font-mono text-xs text-[#D95732] font-bold shrink-0">
+                            {room.roomCode}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold shrink-0 ${statusColorClass}`}
+                          >
+                            {statusLabel}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-[#5C4E41] tabular-nums">
+                          <span className="inline-flex items-center gap-1">
+                            {room.aiHostActive ? (
+                              <Bot className="w-3.5 h-3.5 text-[#365B40] shrink-0" />
+                            ) : (
+                              <User className="w-3.5 h-3.5 text-[#6E6052] shrink-0" />
+                            )}
+                            <span className="truncate max-w-[140px]">Host: {room.hostName}</span>
+                          </span>
+                          <span aria-hidden="true" className="text-[#B8A996]">
+                            ·
+                          </span>
+                          <span>
+                            {room.playerCount}/{room.capacity} seated
+                            {room.joinable
+                              ? ` (${room.availableSeats} ${room.availableSeats === 1 ? 'seat' : 'seats'} open)`
+                              : ''}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-[#6E6052] tabular-nums">
+                          <span className="inline-flex items-center gap-1 font-medium">
+                            <Clock className="w-3 h-3 text-[#365B40]" />
+                            {timerLabel}
+                          </span>
+                          <span aria-hidden="true" className="text-[#B8A996]">
+                            ·
+                          </span>
+                          <span className="font-medium">
+                            {DIFFICULTY_META[room.difficulty ?? 'easy'].shortTag}
+                          </span>
+                        </div>
+                      </div>
+
+                      {room.joinable ? (
+                        <button
+                          type="button"
+                          disabled={Boolean(joiningRoomCode)}
+                          onClick={() => handleJoinPublicRoom(room)}
+                          className="w-full sm:w-auto min-h-[42px] px-5 py-2 rounded-xl bg-[#D95732] text-white text-xs font-bold hover:bg-[#E3613B] transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait whitespace-nowrap shrink-0"
+                        >
+                          {isJoiningThis ? 'Joining...' : 'Join'}
+                        </button>
+                      ) : (
+                        <span className="inline-flex items-center justify-center px-3.5 py-2 rounded-xl bg-[#EFE6D8] text-[#7D6E5F] text-xs font-semibold whitespace-nowrap shrink-0">
+                          {room.status === 'playing' ? 'In Progress' : 'Room Full'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
 
