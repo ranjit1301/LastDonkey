@@ -15,7 +15,6 @@ import {
   VolumeX,
 } from 'lucide-react';
 import {
-  ACE_OF_SPADES_ID,
   canFinishPracticeSessionEarly,
   DIFFICULTY_META,
   formatCard,
@@ -31,6 +30,7 @@ import {
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DiscardedCardTracker } from '../components/DiscardedCardTracker';
 import { MediumAssistBar } from '../components/MediumAssistBar';
+import { PlayerHandTray } from '../components/PlayerHandTray';
 import { PlayingCard } from '../components/PlayingCard';
 import { TrickOutcomeNotification } from '../components/TrickOutcomeNotification';
 import {
@@ -38,6 +38,7 @@ import {
   shouldHidePassAndPlayHand,
   shouldShowPassAndPlayPrivacyCurtain,
 } from '../lib/localExit';
+import { deriveTableTurnState } from '../lib/tableTurnState';
 import {
   buildTurnKey,
   EMPTY_LOCAL_TURN_TIMER,
@@ -77,20 +78,6 @@ function normalizePlayers(gameState: UnifiedGameState): UnifiedPlayer[] {
       cardCount: count,
     };
   });
-}
-
-function computeLegalCards(state: UnifiedGameState, player: UnifiedPlayer): Card[] {
-  if (state.phase !== 'playing' || state.currentTurnPlayerId !== player.id) return [];
-  if (player.finished || player.removed || player.hand.length === 0) return [];
-
-  if (state.isFirstTurnOfGame) {
-    const ace = player.hand.find((c) => c.id === ACE_OF_SPADES_ID);
-    if (ace) return [ace];
-  }
-  const ledSuit = state.currentTrick.ledSuit;
-  if (!ledSuit) return [...player.hand];
-  const sameSuit = player.hand.filter((c) => c.suit === ledSuit);
-  return sameSuit.length > 0 ? sameSuit : [...player.hand];
 }
 
 interface CardTableScreenProps {
@@ -246,12 +233,50 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     return ordered;
   }, [players, perspectivePlayer.id]);
 
-  const isPerspectivePlayersTurn =
-    gameState.phase === 'playing' &&
-    gameState.currentTurnPlayerId === perspectivePlayer.id &&
-    perspectivePlayer.type === 'human' &&
-    !perspectivePlayer.removed &&
-    !perspectivePlayer.finished;
+  // Single authoritative turn & card-selection state (matches server-side getLegalCards rules)
+  const turnState = useMemo(
+    () =>
+      deriveTableTurnState({
+        gameState,
+        perspectivePlayer,
+        activeTurnPlayer,
+        selectedCardId,
+        isOnline,
+        onlineRoom,
+        connectionStatus: connectionInfo.status,
+        needsPrivacyCurtain,
+      }),
+    [
+      gameState,
+      perspectivePlayer,
+      activeTurnPlayer,
+      selectedCardId,
+      isOnline,
+      onlineRoom,
+      connectionInfo.status,
+      needsPrivacyCurtain,
+    ]
+  );
+
+  // Clear stale or invalid selection immediately on turn/trick/suit/phase/connection changes
+  useEffect(() => {
+    if (!turnState.canActNow) {
+      setSelectedCardId(null);
+      setRuleNotice(null);
+      return;
+    }
+    if (selectedCardId !== null && !turnState.legalCardIds.has(selectedCardId)) {
+      setSelectedCardId(null);
+    }
+  }, [
+    turnState.canActNow,
+    turnState.legalCardIds,
+    selectedCardId,
+    gameState.currentTurnPlayerId,
+    gameState.currentTrick.trickNumber,
+    gameState.currentTrick.ledSuit,
+    gameState.phase,
+  ]);
 
   // Section 10: Exit Game is DISABLED mid-trick for active players;
   // officially finished (or already removed) online players can exit anytime without affecting the game.
@@ -319,7 +344,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
 
   // Deadline-based local turn timer (preserves exact remaining time across Rules/Settings overlays)
   const localTurnKey = !isOnline ? buildTurnKey(gameState) : null;
-  const localTimerEligible = !isOnline && isPerspectivePlayersTurn && !needsPrivacyCurtain;
+  const localTimerEligible = !isOnline && turnState.canActNow;
 
   useEffect(() => {
     if (isOnline) {
@@ -390,20 +415,9 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     return getRemainingSeconds(localTimerState.deadlineAt, nowMs);
   }, [isOnline, onlineRoom?.turnDeadlineAt, gameState.phase, nowMs, localTimerState.deadlineAt]);
 
-  const legalCards = useMemo(
-    () => (isPerspectivePlayersTurn ? computeLegalCards(gameState, perspectivePlayer) : []),
-    [gameState, isPerspectivePlayersTurn, perspectivePlayer]
-  );
-  const legalCardIds = useMemo(() => new Set(legalCards.map((c) => c.id)), [legalCards]);
-
   const sortedHand = useMemo(
     () => sortHand(perspectivePlayer.hand, settings.sortOrder),
     [perspectivePlayer.hand, settings.sortOrder]
-  );
-
-  const selectedCard = useMemo(
-    () => sortedHand.find((c) => c.id === selectedCardId) ?? null,
-    [sortedHand, selectedCardId]
   );
 
   const highestLedPlay = useMemo(() => {
@@ -423,8 +437,8 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
   );
 
   const handleCardTap = (card: Card) => {
-    if (!isPerspectivePlayersTurn) return;
-    if (!legalCardIds.has(card.id)) {
+    if (!turnState.canActNow) return;
+    if (!turnState.legalCardIds.has(card.id)) {
       if (gameState.isFirstTurnOfGame) {
         setRuleNotice('Play the Ace of Spades (A♠) to start the game.');
       } else if (gameState.currentTrick.ledSuit) {
@@ -439,7 +453,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
       onPlayCard(perspectivePlayer.id, card.id);
       return;
     }
-    if (selectedCardId === card.id) {
+    if (turnState.validSelectedCard?.id === card.id) {
       onPlayCard(perspectivePlayer.id, card.id);
       setSelectedCardId(null);
     } else {
@@ -448,48 +462,18 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
   };
 
   const handleConfirmPlay = () => {
-    if (!selectedCard || !isPerspectivePlayersTurn) return;
+    if (!turnState.canPlaySelectedCard || !turnState.validSelectedCard) return;
     setRuleNotice(null);
-    onPlayCard(perspectivePlayer.id, selectedCard.id);
+    onPlayCard(perspectivePlayer.id, turnState.validSelectedCard.id);
     setSelectedCardId(null);
   };
 
   const ledSuit = gameState.currentTrick.ledSuit;
 
-  const turnSubtext = useMemo(() => {
-    if (!isPerspectivePlayersTurn) {
-      if (gameState.phase === 'trick_result') return 'Resolving trick...';
-      if (activeTurnPlayer) {
-        return gameState.isFirstTurnOfGame
-          ? `${activeTurnPlayer.name} leads with A♠...`
-          : `Waiting for ${activeTurnPlayer.name}...`;
-      }
-      return '';
-    }
-    if (gameState.isFirstTurnOfGame) {
-      return 'Play the Ace of Spades (A♠) to start the game.';
-    }
-    if (!ledSuit) {
-      return 'Lead any card from your hand.';
-    }
-    const hasSuit = perspectivePlayer.hand.some((c) => c.suit === ledSuit);
-    if (hasSuit) {
-      return `Follow the suit: play a ${SUIT_NAMES[ledSuit]} card.`;
-    }
-    return `No ${SUIT_NAMES[ledSuit]} in hand — play any card to cut (Rang Vapas)!`;
-  }, [
-    isPerspectivePlayersTurn,
-    gameState.phase,
-    gameState.isFirstTurnOfGame,
-    activeTurnPlayer,
-    ledSuit,
-    perspectivePlayer.hand,
-  ]);
-
   return (
     <div className="min-h-screen h-[100dvh] flex flex-col felt-surface overflow-hidden">
       {/* Top Wooden/Forest Header Bar */}
-      <header className="shrink-0 walnut-rail px-2.5 sm:px-5 py-2 sm:py-2.5 flex items-center justify-between gap-1.5 sm:gap-2 z-20">
+      <header className="shrink-0 walnut-rail px-2.5 sm:px-5 py-1.5 sm:py-2 flex items-center justify-between gap-1.5 sm:gap-2 z-20">
         {/* Left: Exit Button (Disabled Mid-Trick per Section 10) + Room Code */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
           <button
@@ -648,20 +632,20 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
       {/* Body Wrapper: Table Felt + Desktop Easy Mode Discarded-Card Sidebar */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Main Table Felt Body */}
-        <main className="flex-1 min-w-0 min-h-0 relative flex flex-col justify-between gap-2 px-2.5 sm:px-6 pt-2 pb-2.5 overflow-y-auto">
-        {/* TOP OPPONENTS GRID — All 1 to 5 opponents always 100% visible with zero horizontal cutoff */}
+        <main className="flex-1 min-w-0 min-h-0 relative flex flex-col justify-between gap-2 px-2.5 sm:px-6 py-2 overflow-y-auto">
+        {/* TOP OPPONENTS GRID — Sleek compact horizontal cards so all 1 to 5 opponents fit with generous breathing room */}
         <section aria-label="Opponents" className="relative z-10 shrink-0 w-full mx-auto">
           <div
             className={
               opponents.length === 1
-                ? 'grid grid-cols-1 max-w-[210px] mx-auto gap-2'
+                ? 'grid grid-cols-1 max-w-[220px] mx-auto gap-2'
                 : opponents.length === 2
                   ? 'grid grid-cols-2 max-w-md mx-auto gap-2'
                   : opponents.length === 3
-                    ? 'grid grid-cols-3 max-w-2xl mx-auto gap-1.5 sm:gap-2.5'
+                    ? 'grid grid-cols-3 max-w-2xl mx-auto gap-1.5 sm:gap-2'
                     : opponents.length === 4
-                      ? 'grid grid-cols-2 sm:grid-cols-4 max-w-3xl mx-auto gap-1.5 sm:gap-2.5'
-                      : 'grid grid-cols-6 sm:grid-cols-5 max-w-4xl mx-auto gap-1.5 sm:gap-2.5'
+                      ? 'grid grid-cols-2 sm:grid-cols-4 max-w-4xl mx-auto gap-1.5 sm:gap-2'
+                      : 'grid grid-cols-6 sm:grid-cols-5 max-w-5xl mx-auto gap-1.5 sm:gap-2'
             }
           >
             {opponents.map((opp, idx) => {
@@ -670,9 +654,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
               const playedThisTrick = gameState.currentTrick.plays.some(
                 (tp) => tp.playerId === opp.id
               );
-              const isCompactRow = opponents.length >= 4;
-              // For 5 opponents on mobile (6-col grid): top row has 3 players (col-span-2 each),
-              // bottom row has 2 players (col-span-3 each) so all 5 fit in 2 neat rows!
               const spanClass =
                 opponents.length === 5
                   ? idx < 3
@@ -683,25 +664,19 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
               return (
                 <div
                   key={opp.id}
-                  className={`${spanClass} min-w-0 rounded-2xl transition-all border ${
-                    isCompactRow
-                      ? 'px-2 py-1.5 sm:px-3 sm:py-2.5 flex flex-row sm:flex-col items-center gap-2 sm:gap-1 text-left sm:text-center'
-                      : 'px-2.5 py-2 sm:px-3 sm:py-2.5 flex flex-col items-center text-center'
-                  } ${
+                  className={`${spanClass} min-w-0 rounded-xl sm:rounded-2xl transition-all border px-2 py-1.5 sm:px-2.5 sm:py-2 flex flex-row items-center gap-2 text-left ${
                     opp.removed
                       ? 'bg-[#122D1C]/50 border-white/10 opacity-55'
                       : opp.finished
                         ? 'bg-[#143D24]/75 border-[#86EFAC]/40 opacity-85'
                         : isTurn
-                          ? 'bg-[#26693D] border-[#F0B429] ring-1 ring-[#F0B429]/60 shadow-[0_0_18px_rgba(240,180,41,0.35)]'
+                          ? 'bg-[#26693D] border-[#F0B429] ring-1 ring-[#F0B429]/60 shadow-[0_0_16px_rgba(240,180,41,0.35)]'
                           : 'bg-[#174226]/88 border-white/12'
                   }`}
                 >
                   <div className="relative shrink-0">
                     <div
-                      className={`${
-                        isCompactRow ? 'w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm' : 'w-9 h-9 sm:w-10 sm:h-10 text-sm'
-                      } rounded-full flex items-center justify-center font-display font-bold border-2 ${
+                      className={`w-8 h-8 rounded-full flex items-center justify-center font-display text-xs sm:text-sm font-bold border-2 ${
                         isTurn ? 'border-[#F0B429]' : 'border-white/25'
                       }`}
                       style={{
@@ -710,7 +685,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                       }}
                     >
                       {opp.type === 'bot' ? (
-                        <Bot className={isCompactRow ? 'w-4 h-4 sm:w-5 sm:h-5' : 'w-4 h-4 sm:w-5 sm:h-5'} />
+                        <Bot className="w-4 h-4" />
                       ) : (
                         opp.name.slice(0, 1).toUpperCase()
                       )}
@@ -718,22 +693,20 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                     {isTurn && (
                       <span
                         aria-hidden="true"
-                        className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-[#F0B429] ring-2 ring-[#26693D]"
+                        className="turn-dot-pulse absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-[#F5C954] ring-2 ring-[#26693D]"
                       />
                     )}
                   </div>
 
-                  <div className="min-w-0 flex-1 sm:flex-none w-full">
+                  <div className="min-w-0 flex-1">
                     <div
-                      className={`${
-                        isCompactRow ? 'mt-0 sm:mt-1' : 'mt-1'
-                      } text-xs sm:text-sm font-bold text-white truncate leading-tight`}
+                      className="text-xs sm:text-sm font-bold text-white truncate leading-tight"
                       title={opp.name}
                     >
                       {opp.name}
                     </div>
 
-                    <div className="mt-0.5 text-[11px] font-medium text-[#CFE2D5] tabular-nums flex items-center justify-start sm:justify-center gap-1 flex-wrap leading-tight">
+                    <div className="mt-0.5 text-[11px] font-medium text-[#CFE2D5] tabular-nums flex items-center justify-start gap-1 flex-wrap leading-tight">
                       {opp.removed ? (
                         <span className="text-[#FCA5A5]">Removed</span>
                       ) : opp.finished ? (
@@ -747,7 +720,9 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                       )}
 
                       {!opp.finished && !opp.removed && isTurn && (
-                        <span className="text-[10px] font-bold text-[#FDE68A]">· Turn</span>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-[#F5C954] text-[#1D1508] text-[10px] font-extrabold uppercase tracking-wide">
+                          Turn
+                        </span>
                       )}
 
                       {!opp.finished && !opp.removed && playedThisTrick && (
@@ -774,13 +749,13 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           <MediumAssistBar removedCards={gameState.removedCards} hint={mediumHint} />
         )}
 
-        {/* CENTER BATTLE ZONE: Suit Pill + Played Cards + Prominent Amber Turn Banner */}
+        {/* CENTER BATTLE ZONE: Suit Pill + Played Cards + Single Inline Status / Trick Outcome Slot */}
         <section
           aria-label="Current trick"
-          className="relative z-10 flex-1 min-h-0 flex flex-col items-center justify-center gap-2 sm:gap-3 py-1"
+          className="relative z-10 flex-1 min-h-0 flex flex-col items-center justify-center gap-2 sm:gap-2.5 py-1"
         >
-          {/* Crisp White Suit Pill (Matches Screenshot!) */}
-          <div className="px-4 py-1 rounded-full bg-white text-[#1B1815] shadow-md text-xs sm:text-sm font-bold inline-flex items-center gap-1.5 shrink-0">
+          {/* Crisp White Suit Pill */}
+          <div className="px-3.5 py-0.5 rounded-full bg-white text-[#1B1815] shadow-md text-xs sm:text-sm font-bold inline-flex items-center gap-1.5 shrink-0">
             {ledSuit ? (
               <>
                 <span>Suit:</span>
@@ -796,9 +771,9 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           </div>
 
           {/* Center Played Cards */}
-          <div className="w-full max-w-3xl flex flex-wrap items-center justify-center gap-2 sm:gap-3.5 min-h-[84px] sm:min-h-[104px]">
+          <div className="w-full max-w-3xl flex flex-wrap items-center justify-center gap-2 sm:gap-3 min-h-[80px] sm:min-h-[96px]">
             {gameState.currentTrick.plays.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-white/25 bg-black/15 px-5 py-4 text-center text-xs sm:text-sm text-[#DCEBE0]">
+              <div className="rounded-2xl border border-dashed border-white/25 bg-black/15 px-5 py-3.5 text-center text-xs sm:text-sm text-[#DCEBE0]">
                 {gameState.isFirstTurnOfGame
                   ? 'Ace of Spades (A♠) leads Trick 1'
                   : `${activeTurnPlayer?.name ?? 'Leader'} starts Trick ${gameState.currentTrick.trickNumber}`}
@@ -839,32 +814,118 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
             )}
           </div>
 
-          {/* Prominent Warm Amber Turn Prompt Banner (Matches Screenshot image_1d270c3e.png!) */}
-          {isPerspectivePlayersTurn ? (
-            <div className="w-full max-w-md rounded-2xl bg-[#F0A500] text-[#1D1508] px-4 py-2.5 shadow-lg shrink-0">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-display font-bold text-sm sm:text-base">
-                  Your turn!
-                  {displaySecondsLeft !== null ? ` · ${displaySecondsLeft}s` : ''}
-                </span>
-                {perspectivePlayer.consecutiveMissedTurns > 0 && (
-                  <span className="text-[11px] font-bold bg-black/15 px-2 py-0.5 rounded-md">
-                    Missed {perspectivePlayer.consecutiveMissedTurns}/3
-                  </span>
-                )}
+          {/* Single Clean Inline Status Slot (Trick Outcome OR Turn Indicator — never stacked/overlapping!) */}
+          <AnimatePresence mode="wait">
+            {gameState.phase === 'trick_result' && gameState.lastOutcome ? (
+              <TrickOutcomeNotification
+                key={`trick-outcome-${gameState.lastOutcome.trickNumber}`}
+                outcome={gameState.lastOutcome}
+                players={players}
+                autoAdvance={isOnline ? true : settings.autoAdvanceTricks}
+                durationMs={trickNotificationDurationMs}
+                isServerControlled={isOnline}
+                onContinue={isOnline ? undefined : onContinueTrick}
+              />
+            ) : turnState.turnBanner.showYourTurnHighlight ? (
+              <div
+                key="your-turn-banner"
+                role="status"
+                aria-live="polite"
+                data-testid="your-turn-banner"
+                className="w-full max-w-lg rounded-2xl bg-gradient-to-r from-[#F5B700] via-[#F0A500] to-[#F5B700] border-2 border-[#FFF3BF] text-[#1A1205] px-3.5 py-2 shadow-[0_8px_24px_-4px_rgba(245,183,0,0.48)] shrink-0"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className="turn-dot-pulse w-2.5 h-2.5 rounded-full bg-[#1B4D2B] ring-2 ring-[#FFF6D6] shrink-0"
+                    />
+                    <span className="font-display font-extrabold text-sm sm:text-base tracking-wide uppercase shrink-0">
+                      {turnState.turnBanner.headline}
+                    </span>
+                    <span className="hidden sm:inline text-xs font-semibold text-[#261A07]/90 truncate">
+                      · {turnState.turnBanner.subtext}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {perspectivePlayer.consecutiveMissedTurns > 0 && (
+                      <span className="text-[11px] font-bold bg-black/15 px-2 py-0.5 rounded-md">
+                        Missed {perspectivePlayer.consecutiveMissedTurns}/3
+                      </span>
+                    )}
+                    {displaySecondsLeft !== null && (
+                      <span
+                        aria-label={`${displaySecondsLeft} seconds remaining`}
+                        className={`font-mono font-bold text-xs px-2.5 py-0.5 rounded-full tabular-nums ${
+                          displaySecondsLeft <= 5
+                            ? 'bg-[#991B1B] text-white'
+                            : 'bg-[#1D1508]/90 text-[#FFF4CC]'
+                        }`}
+                      >
+                        {displaySecondsLeft}s
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <p className="sm:hidden text-xs font-semibold mt-0.5 leading-snug text-[#261A07]">
+                  {turnState.turnBanner.subtext}
+                </p>
               </div>
-              <p className="text-xs sm:text-sm font-medium mt-0.5 leading-snug">{turnSubtext}</p>
-            </div>
-          ) : (
-            <div className="px-4 py-2 rounded-xl bg-[#13361F]/90 border border-white/15 text-xs sm:text-sm text-[#E5F2E9] text-center max-w-md shrink-0">
-              {turnSubtext}
-              {displaySecondsLeft !== null && activeTurnPlayer?.type === 'human' && (
-                <span className="ml-2 font-mono text-[#F5C954] tabular-nums">
-                  ({displaySecondsLeft}s)
-                </span>
-              )}
-            </div>
-          )}
+            ) : turnState.turnBanner.mode === 'reconnecting_your_turn' ? (
+              <div
+                key="reconnecting-banner"
+                role="status"
+                aria-live="polite"
+                className="w-full max-w-md px-4 py-1.5 rounded-2xl bg-[#2E2410]/95 border border-[#F0B429]/55 text-[#FEF3C7] text-center shrink-0"
+              >
+                <div className="text-xs sm:text-sm font-bold">{turnState.turnBanner.headline}</div>
+                <p className="text-[11px] text-[#FDE68A]/90">{turnState.turnBanner.subtext}</p>
+              </div>
+            ) : turnState.turnBanner.mode === 'other_turn' ? (
+              <div
+                key="other-turn-banner"
+                role="status"
+                aria-live="polite"
+                data-testid="other-turn-banner"
+                className="w-full max-w-md px-3.5 py-1.5 rounded-2xl bg-[#13361F]/92 border border-white/18 text-[#E5F2E9] shrink-0"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className="turn-dot-pulse w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{
+                        backgroundColor: turnState.turnBanner.activePlayerColor ?? '#F5C954',
+                      }}
+                    />
+                    <span className="font-display font-bold text-xs sm:text-sm text-white truncate">
+                      {turnState.turnBanner.headline}
+                    </span>
+                    <span className="hidden sm:inline text-xs text-[#CFE2D5] truncate">
+                      · {turnState.turnBanner.subtext}
+                    </span>
+                  </div>
+                  {displaySecondsLeft !== null && activeTurnPlayer?.type === 'human' && (
+                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-full bg-black/25 text-[#F5C954] tabular-nums shrink-0">
+                      {displaySecondsLeft}s
+                    </span>
+                  )}
+                </div>
+                <p className="sm:hidden text-[11px] text-[#CFE2D5] mt-0.5 leading-snug">
+                  {turnState.turnBanner.subtext}
+                </p>
+              </div>
+            ) : (
+              <div
+                key="fallback-status"
+                role="status"
+                aria-live="polite"
+                className="px-4 py-1.5 rounded-xl bg-[#13361F]/90 border border-white/15 text-xs sm:text-sm text-[#E5F2E9] text-center max-w-md shrink-0"
+              >
+                {turnState.turnBanner.headline}
+              </div>
+            )}
+          </AnimatePresence>
         </section>
 
         {/* BOTTOM ZONE: Fanned Hand + Bottom Play Footer (Matches Screenshot!) */}
@@ -903,7 +964,14 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                   : 'Pass the device to the next player to view their hand.'}
             </div>
           ) : (
-            <>
+            <div
+              data-active-turn={turnState.canActNow ? 'true' : 'false'}
+              className={`rounded-2xl sm:rounded-3xl border px-2.5 sm:px-3.5 pt-2 pb-2 transition-all ${
+                turnState.canActNow
+                  ? 'turn-area-active'
+                  : 'border-white/12 bg-[#10301C]/45'
+              }`}
+            >
               {ruleNotice && (
                 <p
                   role="alert"
@@ -913,77 +981,78 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                 </p>
               )}
 
-              {/* Fanned Playing Cards */}
-              <div
-                aria-label="Playable hand cards"
-                className="w-full overflow-x-auto touch-pan-x no-scrollbar pt-4 pb-1.5 px-3"
-              >
-                <div
-                  className={`flex items-end justify-start sm:justify-center min-w-max mx-auto ${
-                    sortedHand.length > 10
-                      ? '-space-x-7 sm:-space-x-5'
-                      : '-space-x-5 sm:-space-x-4'
-                  }`}
-                >
-                  {sortedHand.map((card) => {
-                    const isLegal = isPerspectivePlayersTurn && legalCardIds.has(card.id);
-                    // Hard mode: never highlight or visually hint which cards to play.
-                    // Medium mode: never highlight/recommend cards either.
-                    const allowClick =
-                      difficulty === 'hard' ? isPerspectivePlayersTurn : isLegal;
-                    const dimmed =
-                      difficulty === 'hard' ? false : isPerspectivePlayersTurn && !isLegal;
-                    const isSelected = selectedCardId === card.id;
+              {/* Progressive Large-Hand Tray with Scroll Controls, Suit-Jump & Auto-Scroll */}
+              <PlayerHandTray
+                sortedHand={sortedHand}
+                ledSuit={ledSuit}
+                canActNow={turnState.canActNow}
+                isFirstTurnOfGame={gameState.isFirstTurnOfGame}
+                turnContextKey={`${gameState.currentTrick.trickNumber}:${gameState.currentTurnPlayerId ?? 'none'}:${gameState.phase}`}
+                legalCardIds={turnState.legalCardIds}
+                selectedCardId={turnState.validSelectedCard?.id ?? null}
+                getCardSelectionState={turnState.getCardSelectionState}
+                onCardTap={handleCardTap}
+              />
 
-                    return (
-                      <div
-                        key={card.id}
-                        className={`transition-all ${isSelected ? 'z-30' : 'hover:z-20'}`}
-                      >
-                        <PlayingCard
-                          card={card}
-                          size="lg"
-                          playable={allowClick}
-                          selected={isSelected}
-                          dimmed={dimmed}
-                          highlighted={false}
-                          onClick={() => handleCardTap(card)}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Bottom Footer Bar: Player Name & Count + Large Rounded Play Button */}
+              {/* Bottom Footer Bar: Player Name, Turn Status & Prominent Play Button */}
               <div className="mt-1 flex items-center justify-between gap-2.5 sm:gap-4 px-1">
                 <div className="min-w-0">
-                  <div className="text-sm sm:text-base font-bold text-white truncate">
-                    {perspectivePlayer.name}:{' '}
-                    <span className="tabular-nums">{perspectivePlayer.cardCount}</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm sm:text-base font-bold text-white truncate">
+                      {perspectivePlayer.name}:{' '}
+                      <span className="tabular-nums">{perspectivePlayer.cardCount}</span>
+                    </span>
+                    {turnState.canActNow && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F5C954] text-[#1A1205] text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider shadow-sm shrink-0">
+                        <span
+                          aria-hidden="true"
+                          className="turn-dot-pulse w-1.5 h-1.5 rounded-full bg-[#1B4D2B]"
+                        />
+                        Your Turn
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-[#C4DEC9]">
                     {perspectivePlayer.cardCount === 1 ? 'card' : 'cards'}
+                    {turnState.canActNow && (
+                      <span className="ml-1.5 text-[#FDE68A] font-semibold">
+                        · {turnState.legalCards.length} playable
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <button
                   type="button"
-                  disabled={!isPerspectivePlayersTurn || !selectedCard}
+                  disabled={!turnState.canPlaySelectedCard}
                   onClick={handleConfirmPlay}
-                  className={`min-h-[48px] sm:min-h-[52px] min-w-[136px] sm:min-w-[200px] px-4 sm:px-7 py-2.5 sm:py-3 rounded-full font-display font-bold text-sm sm:text-lg flex items-center justify-center gap-2 transition-all shrink-0 ${
-                    isPerspectivePlayersTurn && selectedCard
-                      ? 'btn-orange-3d cursor-pointer'
-                      : 'bg-[#6F5841]/75 text-[#D8C5B0] cursor-not-allowed'
+                  className={`min-h-[44px] sm:min-h-[46px] min-w-[140px] sm:min-w-[196px] px-4 sm:px-6 py-2 rounded-full font-display font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all shrink-0 ${
+                    turnState.canPlaySelectedCard
+                      ? 'btn-orange-3d ring-2 ring-[#FDE68A]/90 shadow-[0_4px_0_#A83C1E,0_0_22px_rgba(245,190,48,0.48)] cursor-pointer'
+                      : turnState.canActNow
+                        ? 'bg-[#225433] border-2 border-[#F5C954]/65 text-[#FEF3C7] cursor-not-allowed'
+                        : 'bg-[#163621]/80 border border-white/10 text-[#9CB8A5] cursor-not-allowed'
                   }`}
                 >
-                  <span className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+                  <span
+                    className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
+                      turnState.canPlaySelectedCard
+                        ? 'bg-white/25'
+                        : turnState.canActNow
+                          ? 'bg-[#F5C954]/20 text-[#F5C954]'
+                          : 'bg-white/10'
+                    }`}
+                  >
                     <ArrowUp className="w-4 h-4" aria-hidden="true" />
                   </span>
-                  {selectedCard ? `Play ${formatCard(selectedCard)}` : 'Play'}
+                  {turnState.validSelectedCard
+                    ? `Play ${formatCard(turnState.validSelectedCard)}`
+                    : turnState.canActNow
+                      ? 'Select a Card'
+                      : 'Play'}
                 </button>
               </div>
-            </>
+            </div>
           )}
         </section>
       </main>
@@ -1003,20 +1072,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           onClose={() => setDiscardDrawerOpen(false)}
         />
       )}
-
-      {/* Non-Blocking Successful / Failed Trick Notification Banner */}
-      <AnimatePresence>
-        {gameState.phase === 'trick_result' && gameState.lastOutcome && (
-          <TrickOutcomeNotification
-            outcome={gameState.lastOutcome}
-            players={players}
-            autoAdvance={isOnline ? true : settings.autoAdvanceTricks}
-            durationMs={trickNotificationDurationMs}
-            isServerControlled={isOnline}
-            onContinue={isOnline ? undefined : onContinueTrick}
-          />
-        )}
-      </AnimatePresence>
 
       {/* Pass-and-Play Privacy Handoff Curtain */}
       {needsPrivacyCurtain && activeTurnPlayer && (

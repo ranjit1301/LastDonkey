@@ -1,7 +1,7 @@
 import React from 'react';
 import { formatRank, isRedSuit, SUIT_NAMES, SUIT_SYMBOLS, type Card } from '../engine';
 
-export type CardSize = 'xs' | 'sm' | 'md' | 'lg';
+export type CardSize = 'xs' | 'sm' | 'compact' | 'md' | 'lg';
 
 interface PlayingCardProps {
   card: Card;
@@ -9,6 +9,7 @@ interface PlayingCardProps {
   playable?: boolean;
   selected?: boolean;
   dimmed?: boolean;
+  waitingMuted?: boolean;
   highlighted?: boolean;
   onClick?: () => void;
   className?: string;
@@ -38,6 +39,13 @@ const SIZE_CLASSES: Record<
     centerSuit: 'text-2xl sm:text-3xl leading-none',
     padding: 'p-1.5',
   },
+  compact: {
+    wrapper: 'w-[62px] h-[90px] sm:w-[72px] sm:h-[104px] rounded-[10px]',
+    rank: 'text-[13px] sm:text-sm leading-none font-bold',
+    cornerSuit: 'text-[11px] sm:text-xs leading-none',
+    centerSuit: 'text-2xl sm:text-3xl leading-none',
+    padding: 'p-1.5',
+  },
   md: {
     wrapper: 'w-[68px] h-[98px] sm:w-[82px] sm:h-[118px] rounded-[10px]',
     rank: 'text-sm sm:text-base leading-none font-bold',
@@ -46,11 +54,11 @@ const SIZE_CLASSES: Record<
     padding: 'p-1.5 sm:p-2',
   },
   lg: {
-    wrapper: 'w-[78px] h-[112px] sm:w-[92px] sm:h-[132px] rounded-xl',
-    rank: 'text-base sm:text-lg leading-none font-bold',
-    cornerSuit: 'text-sm sm:text-base leading-none',
-    centerSuit: 'text-4xl sm:text-5xl leading-none',
-    padding: 'p-2',
+    wrapper: 'w-[70px] h-[100px] sm:w-[82px] sm:h-[116px] rounded-xl',
+    rank: 'text-sm sm:text-base leading-none font-bold',
+    cornerSuit: 'text-xs sm:text-sm leading-none',
+    centerSuit: 'text-3xl sm:text-4xl leading-none',
+    padding: 'p-1.5 sm:p-2',
   },
 };
 
@@ -60,6 +68,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
   playable = false,
   selected = false,
   dimmed = false,
+  waitingMuted = false,
   highlighted = false,
   onClick,
   className = '',
@@ -73,17 +82,26 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
 
   const interactiveClasses = onClick
     ? playable
-      ? 'cursor-pointer hover:-translate-y-2.5 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F0CB6B]'
+      ? 'cursor-pointer hover:-translate-y-3 hover:ring-2 hover:ring-[#F5C954]/85 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F5C954]'
       : 'cursor-not-allowed'
     : '';
 
+  const borderClass =
+    onClick && playable && !selected ? 'border-[#E8C563]' : 'border-[#DFD6C3]';
+
   const stateClasses = selected
-    ? '-translate-y-4 sm:-translate-y-5 ring-2 ring-[#F0CB6B] shadow-[0_14px_28px_-6px_rgba(240,203,107,0.45)]'
+    ? '-translate-y-4 sm:-translate-y-5 ring-[3px] ring-[#F5C954] shadow-[0_16px_30px_-6px_rgba(245,201,84,0.55)]'
     : highlighted
       ? 'ring-2 ring-[#F0CB6B] shadow-[0_0_24px_rgba(240,203,107,0.35)]'
-      : '';
+      : onClick && playable
+        ? 'shadow-[0_8px_18px_-5px_rgba(245,201,84,0.34),0_2px_5px_-1px_rgba(0,0,0,0.22)]'
+        : '';
 
-  const dimClasses = dimmed ? 'opacity-45 saturate-50 brightness-90' : '';
+  const dimClasses = dimmed
+    ? 'opacity-40 saturate-[0.3] brightness-[0.82] translate-y-1.5'
+    : waitingMuted
+      ? 'opacity-80 brightness-[0.94]'
+      : '';
   const colorClass = red ? 'text-[#C81E1E]' : 'text-[#141A21]';
 
   const Tag = onClick ? 'button' : 'div';
@@ -93,10 +111,12 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       disabled={onClick ? !playable : undefined}
-      aria-label={`${rankLabel} of ${SUIT_NAMES[card.suit]}${selected ? ', selected' : ''}${playable ? ', playable' : ''}`}
+      aria-disabled={onClick && !playable ? true : undefined}
+      aria-label={`${rankLabel} of ${SUIT_NAMES[card.suit]}${selected ? ', selected' : ''}${playable ? ', playable' : onClick ? ', not playable' : ''}`}
       aria-pressed={onClick ? selected : undefined}
       className={[
-        'relative select-none card-ivory border border-[#DFD6C3] flex flex-col justify-between transition-transform duration-150 ease-out will-change-transform',
+        'relative select-none card-ivory border flex flex-col justify-between transition-[transform,opacity,filter,box-shadow,border-color] duration-150 ease-out will-change-transform',
+        borderClass,
         cfg.wrapper,
         cfg.padding,
         colorClass,

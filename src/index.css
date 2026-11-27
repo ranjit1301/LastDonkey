@@ -105,6 +105,27 @@
   scrollbar-width: none;
 }
 
+/* Slim felt-matched visible scrollbar for large card hands and results trays */
+.hand-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(245, 201, 84, 0.52) rgba(8, 28, 16, 0.42);
+}
+.hand-scrollbar::-webkit-scrollbar {
+  height: 7px;
+  width: 7px;
+}
+.hand-scrollbar::-webkit-scrollbar-track {
+  background: rgba(8, 28, 16, 0.42);
+  border-radius: 9999px;
+}
+.hand-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(245, 201, 84, 0.52);
+  border-radius: 9999px;
+}
+.hand-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 201, 84, 0.8);
+}
+
 /* Clear keyboard focus rings on both warm parchment and dark green felt surfaces */
 button:focus-visible,
 a:focus-visible,
@@ -121,6 +142,58 @@ select:focus-visible,
 .walnut-rail button:focus-visible {
   outline: 2px solid #f5c954;
   outline-offset: 2px;
+}
+
+/* Subtle, tactile active-turn glow for the player's hand area & live turn dot */
+.turn-area-active {
+  border-color: rgba(245, 201, 84, 0.85);
+  background: linear-gradient(
+    180deg,
+    rgba(245, 201, 84, 0.13) 0%,
+    rgba(20, 66, 38, 0.58) 38%,
+    rgba(16, 52, 30, 0.72) 100%
+  );
+  box-shadow:
+    0 0 0 1px rgba(245, 201, 84, 0.35),
+    0 0 26px -4px rgba(245, 190, 48, 0.38),
+    inset 0 1px 0 rgba(255, 244, 196, 0.22);
+}
+
+@keyframes turn-glow-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(245, 201, 84, 0.35),
+      0 0 24px -4px rgba(245, 190, 48, 0.34),
+      inset 0 1px 0 rgba(255, 244, 196, 0.22);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(245, 201, 84, 0.55),
+      0 0 34px -2px rgba(245, 190, 48, 0.52),
+      inset 0 1px 0 rgba(255, 244, 196, 0.32);
+  }
+}
+
+@keyframes turn-dot-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 0.72;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .turn-area-active {
+    animation: turn-glow-breathe 2.4s ease-in-out infinite;
+  }
+  .turn-dot-pulse {
+    animation: turn-dot-breathe 1.6s ease-in-out infinite;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

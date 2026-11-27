@@ -15,6 +15,7 @@ import {
   type PlayerConfig,
 } from '../engine/index.ts';
 import type { TurnTimerSeconds } from '../lib/settings.ts';
+import { cloneTrickOutcome } from '../lib/trickHistory.ts';
 import type {
   ClientGameStateView,
   ClientRoomState,
@@ -392,8 +393,23 @@ export class RoomManager {
 
     if (room.gameState) {
       const isFinished = room.gameState.phase === 'finished';
+      // Expose the complete chronological trick history safely once the match finishes.
+      // During active gameplay, never send full historical tricks over the wire
+      // (Medium mode hints only need the single most recent outcome; Hard mode receives none).
+      const safeTrickHistory = isFinished
+        ? room.gameState.trickHistory.map(cloneTrickOutcome)
+        : room.difficulty === 'hard'
+          ? []
+          : room.gameState.lastOutcome
+            ? [cloneTrickOutcome(room.gameState.lastOutcome)]
+            : [];
+
       sanitizedGame = {
         ...room.gameState,
+        lastOutcome: room.gameState.lastOutcome
+          ? cloneTrickOutcome(room.gameState.lastOutcome)
+          : null,
+        trickHistory: safeTrickHistory,
         players: room.gameState.players.map((p) => {
           const revealHand =
             p.id === viewerPlayerId ||

@@ -149,15 +149,31 @@ export function createInitialGameState(
   };
 }
 
+export interface LegalCardsPlayerView {
+  id: string;
+  finished: boolean;
+  removed: boolean;
+  hand: readonly Card[];
+}
+
+export interface LegalCardsStateView {
+  phase: GameState['phase'];
+  currentTurnPlayerId: string | null;
+  isFirstTurnOfGame: boolean;
+  currentTrick: Pick<GameState['currentTrick'], 'ledSuit'>;
+  players: readonly LegalCardsPlayerView[];
+}
+
 /**
  * Returns the exact list of legal cards a player may play on their turn.
+ * Shared by both server-side playCard validation and client-side selection UI.
  */
-export function getLegalCards(state: GameState, playerId: string): Card[] {
+export function getLegalCards(state: LegalCardsStateView, playerId: string): Card[] {
   if (state.phase !== 'playing') return [];
   if (state.currentTurnPlayerId !== playerId) return [];
 
   const player = state.players.find((p) => p.id === playerId);
-  if (!player || !isPlayerActive(player) || player.hand.length === 0) return [];
+  if (!player || player.finished || player.removed || player.hand.length === 0) return [];
 
   // Section 5: First turn of the game must be Ace of Spades.
   if (state.isFirstTurnOfGame) {

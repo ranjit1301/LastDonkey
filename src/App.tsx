@@ -816,7 +816,7 @@ export default function App() {
       {toasts.length > 0 && (
         <div
           aria-live="polite"
-          className="pointer-events-none fixed inset-x-0 bottom-20 sm:bottom-6 z-50 flex flex-col items-center gap-2 px-4"
+          className="pointer-events-none fixed inset-x-0 top-14 sm:top-16 z-50 flex flex-col items-center gap-2 px-4"
         >
           {toasts.map((t) => (
             <div

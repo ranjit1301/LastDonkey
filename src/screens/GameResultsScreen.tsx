@@ -3,7 +3,9 @@ import { Check, Clock, Home, Play, RotateCcw, Trophy, Users, X } from 'lucide-re
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DonkeyEmblem } from '../components/DonkeyEmblem';
 import { PlayingCard } from '../components/PlayingCard';
+import { TrickHistorySection } from '../components/TrickHistorySection';
 import { DIFFICULTY_META, sortHand, type GameState } from '../engine';
+import { shouldUseCompactResultsHand } from '../lib/handLayout';
 import type { ConnectionStatusInfo } from '../lib/multiplayerClient';
 import type { ClientGameStateView, ClientRoomState } from '../server/roomTypes';
 
@@ -135,14 +137,28 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
 
             {donkeyPlayer && donkeyPlayer.hand.length > 0 && (
               <div className="mt-5 w-full">
-                <p className="text-xs text-[#C7DFCE] mb-3 tabular-nums">
+                <p className="text-xs text-[#C7DFCE] mb-2.5 tabular-nums">
                   Remaining cards left in {donkeyPlayer.name}’s hand ({donkeyPlayer.hand.length})
                 </p>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  {sortHand(donkeyPlayer.hand, 'desc').map((card) => (
-                    <PlayingCard key={card.id} card={card} size="sm" />
-                  ))}
-                </div>
+                {shouldUseCompactResultsHand(donkeyPlayer.hand.length) ? (
+                  <div
+                    aria-label="Remaining cards in Donkey hand"
+                    data-compact-donkey-hand="true"
+                    className="max-h-[210px] sm:max-h-[228px] overflow-y-auto hand-scrollbar rounded-2xl bg-black/20 border border-white/12 p-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-center gap-1">
+                      {sortHand(donkeyPlayer.hand, 'desc').map((card) => (
+                        <PlayingCard key={card.id} card={card} size="xs" />
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {sortHand(donkeyPlayer.hand, 'desc').map((card) => (
+                      <PlayingCard key={card.id} card={card} size="sm" />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -345,6 +361,13 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
             </dl>
           </section>
         </div>
+
+        {/* Collapsible Chronological Trick History */}
+        <TrickHistorySection
+          trickHistory={gameState.trickHistory}
+          players={gameState.players}
+          fallbackSeats={onlineRoom?.seats}
+        />
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 pt-1">
