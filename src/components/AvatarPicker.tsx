@@ -31,9 +31,9 @@ export const AvatarPicker: React.FC<AvatarPickerProps> = ({
   const activeProfile = getBotAvatarById(selectedAvatarId);
 
   return (
-    <div className="space-y-2.5" role="group" aria-label={ariaLabel}>
-      <div className="flex items-center justify-between gap-2 text-xs text-[#6E6052]">
-        <span className="font-semibold text-[#3A2E25]">
+    <div className="space-y-2.5" role="group" aria-label={ariaLabel} data-testid="avatar-picker">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#6E6052]">
+        <span className="font-semibold text-[#3A2E25] leading-snug">
           {activeProfile
             ? `${activeProfile.name} · ${activeProfile.personality}`
             : 'Auto-assign an unused character on join'}
@@ -42,7 +42,7 @@ export const AvatarPicker: React.FC<AvatarPickerProps> = ({
           <button
             type="button"
             onClick={() => onSelect('')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#5C4E41] hover:border-[#D95732] hover:text-[#D95732] transition-colors cursor-pointer shrink-0"
+            className="inline-flex items-center gap-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#5C4E41] hover:border-[#D95732] hover:text-[#D95732] transition-colors cursor-pointer shrink-0"
           >
             <Shuffle className="w-3 h-3" aria-hidden="true" />
             Auto
@@ -72,7 +72,7 @@ export const AvatarPicker: React.FC<AvatarPickerProps> = ({
               }
               title={isTaken ? `${profile.name} — already taken in room` : `${profile.name} — ${profile.personality}`}
               onClick={() => onSelect(profile.id)}
-              className={`relative flex flex-col items-center gap-1 rounded-2xl p-1.5 sm:p-2 border transition-all text-center ${
+              className={`relative min-w-0 flex flex-col items-center justify-center gap-1 rounded-2xl p-1.5 sm:p-2 border transition-all text-center ${
                 isSelected
                   ? 'bg-[#FAF5ED] border-[#D95732] ring-2 ring-[#D95732]/30 shadow-xs cursor-pointer'
                   : isTaken

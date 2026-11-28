@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Bot,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Globe,
   HelpCircle,
@@ -88,6 +90,10 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
 
   const selectedAvatarProfile = getBotAvatarById(selectedAvatarId);
   const chosenAvatarOrUndefined = selectedAvatarProfile?.id;
+
+  useEffect(() => {
+    setSelectedAvatarId(initialAvatarId);
+  }, [initialAvatarId]);
 
   const handleSelectAvatar = (nextAvatarId: string) => {
     setSelectedAvatarId(nextAvatarId);
@@ -373,8 +379,10 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                   Your name
                 </label>
                 <div className="flex items-center gap-2.5">
+                  {/* Desktop inline avatar trigger (unchanged desktop behavior) */}
                   <button
                     type="button"
+                    data-testid="desktop-avatar-trigger"
                     onClick={() => setAvatarPickerOpen((prev) => !prev)}
                     aria-expanded={avatarPickerOpen}
                     aria-label="Choose your character avatar"
@@ -383,7 +391,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                         ? `${selectedAvatarProfile.name} — tap to change avatar`
                         : 'Auto-assign character — tap to choose avatar'
                     }
-                    className="shrink-0 min-h-[54px] px-2.5 rounded-2xl bg-[#EFE6D8] hover:bg-[#E7DCCB] border border-[#DDD1BE] flex items-center gap-2 transition-colors cursor-pointer"
+                    className="hidden sm:flex shrink-0 min-h-[54px] px-2.5 rounded-2xl bg-[#EFE6D8] hover:bg-[#E7DCCB] border border-[#DDD1BE] items-center gap-2 transition-colors cursor-pointer"
                   >
                     {selectedAvatarProfile ? (
                       <PlayerAvatar
@@ -399,7 +407,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                         Auto
                       </span>
                     )}
-                    <span className="text-xs font-semibold text-[#3A2E25] hidden sm:inline max-w-[78px] truncate">
+                    <span className="text-xs font-semibold text-[#3A2E25] max-w-[78px] truncate">
                       {selectedAvatarProfile ? selectedAvatarProfile.name.split(' ')[0] : 'Avatar'}
                     </span>
                   </button>
@@ -414,6 +422,56 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                     className="flex-1 min-w-0 min-h-[54px] px-4 rounded-2xl bg-[#EFE6D8] border border-[#DDD1BE] text-base font-medium text-[#261E18] placeholder:text-[#8E7F6F] focus:outline-none focus:border-[#D95732] focus:bg-[#F5EEE2] transition-colors"
                   />
                 </div>
+              </div>
+
+              {/* Mobile clearly labeled Avatar Selector Bar (< 640px) */}
+              <div className="sm:hidden">
+                <span className="block text-sm font-semibold text-[#3A2E25] mb-1.5">
+                  Your avatar
+                </span>
+                <button
+                  type="button"
+                  data-testid="mobile-avatar-trigger"
+                  onClick={() => setAvatarPickerOpen((prev) => !prev)}
+                  aria-expanded={avatarPickerOpen}
+                  aria-label="Choose your character avatar"
+                  className="w-full min-h-[56px] px-3.5 py-2.5 rounded-2xl bg-[#EFE6D8] hover:bg-[#E7DCCB] border border-[#DDD1BE] flex items-center justify-between gap-2.5 text-left transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {selectedAvatarProfile ? (
+                      <PlayerAvatar
+                        name={selectedAvatarProfile.name}
+                        type="human"
+                        avatarColor={selectedAvatarProfile.accentColor}
+                        avatarId={selectedAvatarProfile.id}
+                        size="sm"
+                        animated={false}
+                      />
+                    ) : (
+                      <span className="w-9 h-9 rounded-full bg-[#365B40] text-[#FAF5ED] flex items-center justify-center text-xs font-bold shrink-0">
+                        Auto
+                      </span>
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-[#261E18] leading-snug">
+                        {selectedAvatarProfile ? selectedAvatarProfile.name : 'Auto-Assigned Character'}
+                      </div>
+                      <div className="text-[11px] text-[#6E6052] leading-snug">
+                        {selectedAvatarProfile
+                          ? selectedAvatarProfile.personality
+                          : 'Tap to choose one of 12 characters'}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] shrink-0">
+                    {avatarPickerOpen ? 'Done' : selectedAvatarProfile ? 'Change' : 'Choose'}
+                    {avatarPickerOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-[#D95732]" aria-hidden="true" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-[#D95732]" aria-hidden="true" />
+                    )}
+                  </span>
+                </button>
               </div>
 
               {avatarPickerOpen && (

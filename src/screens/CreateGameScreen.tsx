@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ArrowLeft, Bot, Globe, Lock, Users } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ArrowLeft, Bot, ChevronDown, ChevronUp, Globe, Lock, Users } from 'lucide-react';
 import { getDealingCounts, type DifficultyMode } from '../engine';
 import { AvatarPicker } from '../components/AvatarPicker';
 import { PlayerAvatar } from '../components/BotAvatar';
@@ -61,6 +61,10 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
 
   const selectedAvatarProfile = getBotAvatarById(selectedAvatarId);
   const dealingCounts = getDealingCounts(capacity);
+
+  useEffect(() => {
+    setSelectedAvatarId(initialAvatarId);
+  }, [initialAvatarId]);
 
   const handleSelectAvatar = (nextAvatarId: string) => {
     setSelectedAvatarId(nextAvatarId);
@@ -201,55 +205,73 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
               </div>
             </div>
 
-            <div className="rounded-2xl bg-[#EFE6D8] border border-[#DFD3C1] p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  {selectedAvatarProfile ? (
-                    <PlayerAvatar
-                      name={selectedAvatarProfile.name}
-                      type="human"
-                      avatarColor={selectedAvatarProfile.accentColor}
-                      avatarId={selectedAvatarProfile.id}
-                      size="sm"
-                      animated={false}
-                    />
-                  ) : (
-                    <span className="w-9 h-9 rounded-full bg-[#365B40] text-[#FAF5ED] flex items-center justify-center text-xs font-bold shrink-0">
-                      Auto
-                    </span>
-                  )}
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-[#261E18] truncate">
-                      {selectedAvatarProfile ? selectedAvatarProfile.name : 'Auto-Assigned Character'}
-                    </div>
-                    <div className="text-[11px] text-[#6E6052] truncate">
-                      {selectedAvatarProfile
-                        ? selectedAvatarProfile.personality
-                        : 'An unused character will be assigned automatically'}
+            <div>
+              <span className="block text-sm font-semibold text-[#3A2E25] mb-1.5">
+                Your Avatar
+              </span>
+              <div className="rounded-2xl bg-[#EFE6D8] border border-[#DFD3C1] p-3">
+                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 sm:gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    {selectedAvatarProfile ? (
+                      <PlayerAvatar
+                        name={selectedAvatarProfile.name}
+                        type="human"
+                        avatarColor={selectedAvatarProfile.accentColor}
+                        avatarId={selectedAvatarProfile.id}
+                        size="sm"
+                        animated={false}
+                      />
+                    ) : (
+                      <span className="w-9 h-9 rounded-full bg-[#365B40] text-[#FAF5ED] flex items-center justify-center text-xs font-bold shrink-0">
+                        Auto
+                      </span>
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-[#261E18] leading-snug">
+                        {selectedAvatarProfile ? selectedAvatarProfile.name : 'Auto-Assigned Character'}
+                      </div>
+                      <div className="text-[11px] text-[#6E6052] leading-snug">
+                        {selectedAvatarProfile
+                          ? selectedAvatarProfile.personality
+                          : 'An unused character will be assigned automatically'}
+                      </div>
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    data-testid="create-avatar-trigger"
+                    aria-expanded={avatarPickerOpen}
+                    onClick={() => setAvatarPickerOpen((prev) => !prev)}
+                    className="w-full sm:w-auto min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5"
+                  >
+                    <span>
+                      {avatarPickerOpen
+                        ? 'Done'
+                        : selectedAvatarProfile
+                          ? 'Change Avatar'
+                          : 'Choose Avatar'}
+                    </span>
+                    {avatarPickerOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-[#D95732]" aria-hidden="true" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-[#D95732]" aria-hidden="true" />
+                    )}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setAvatarPickerOpen((prev) => !prev)}
-                  className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer shrink-0"
-                >
-                  {avatarPickerOpen ? 'Done' : 'Change Avatar'}
-                </button>
+                {avatarPickerOpen && (
+                  <div className="mt-3 pt-3 border-t border-[#DFD3C1]">
+                    <AvatarPicker
+                      selectedAvatarId={selectedAvatarId}
+                      onSelect={(id) => {
+                        handleSelectAvatar(id);
+                        if (id) setAvatarPickerOpen(false);
+                      }}
+                      allowAuto
+                      compact
+                    />
+                  </div>
+                )}
               </div>
-              {avatarPickerOpen && (
-                <div className="mt-3 pt-3 border-t border-[#DFD3C1]">
-                  <AvatarPicker
-                    selectedAvatarId={selectedAvatarId}
-                    onSelect={(id) => {
-                      handleSelectAvatar(id);
-                      if (id) setAvatarPickerOpen(false);
-                    }}
-                    allowAuto
-                    compact
-                  />
-                </div>
-              )}
             </div>
           </div>
 

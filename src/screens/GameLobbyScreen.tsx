@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bot,
@@ -82,6 +82,12 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
   const [copiedType, setCopiedType] = useState<'code' | 'link' | null>(null);
   const [editingAvatarSeatKey, setEditingAvatarSeatKey] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const avatarPickerSectionRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!editingAvatarSeatKey) return;
+    avatarPickerSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [editingAvatarSeatKey]);
 
   useEffect(() => {
     if (!onlineRoom?.vacancyExpiresAt) return;
@@ -194,7 +200,7 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
         </button>
       </header>
 
-      <main className="flex-1 w-full max-w-3xl mx-auto px-4 sm:px-6 pb-32 pt-2 space-y-5">
+      <main className="flex-1 w-full max-w-3xl mx-auto px-4 sm:px-6 pb-36 pt-2 space-y-5">
         {isOnline && connectionInfo && connectionInfo.status !== 'connected' && (
           <ConnectionBanner
             connectionInfo={connectionInfo}
@@ -402,6 +408,87 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
           )}
         </div>
 
+        {/* Inline Waiting-Lobby Avatar Picker Panel (placed above the seat grid so it stays visible above the sticky footer on mobile & desktop) */}
+        {editingAvatarSeatKey &&
+          (() => {
+            if (onlineRoom && onlineRoom.status === 'waiting') {
+              const yourSeat = onlineRoom.seats.find(
+                (s) => s.playerId === onlineRoom.yourPlayerId && s.playerId === editingAvatarSeatKey
+              );
+              if (!yourSeat || !onOnlineUpdateAvatar) return null;
+              const takenIds = new Set(
+                onlineRoom.seats
+                  .filter((s) => s.playerId !== yourSeat.playerId)
+                  .map((s) => s.avatarId ?? s.botAvatarId)
+                  .filter((id): id is string => Boolean(id))
+              );
+              return (
+                <section
+                  ref={avatarPickerSectionRef}
+                  data-testid="lobby-avatar-picker-panel"
+                  className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2.5 scroll-mt-4"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-display text-base font-bold text-[#261E18]">
+                      Choose Avatar for {yourSeat.name}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingAvatarSeatKey(null)}
+                      className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#EFE6D8] text-xs font-semibold text-[#3A2E25] hover:text-[#261E18] cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+                  <AvatarPicker
+                    selectedAvatarId={yourSeat.avatarId ?? yourSeat.botAvatarId ?? ''}
+                    takenAvatarIds={takenIds}
+                    onSelect={(avatarId) => {
+                      if (!avatarId) return;
+                      onOnlineUpdateAvatar(avatarId);
+                      setEditingAvatarSeatKey(null);
+                    }}
+                  />
+                </section>
+              );
+            }
+
+            if (localConfig && editingAvatarSeatKey.startsWith('local:')) {
+              const idx = Number(editingAvatarSeatKey.slice('local:'.length));
+              const target = localConfig.players[idx];
+              if (!target || target.type !== 'human') return null;
+              return (
+                <section
+                  ref={avatarPickerSectionRef}
+                  data-testid="lobby-avatar-picker-panel"
+                  className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2.5 scroll-mt-4"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-display text-base font-bold text-[#261E18]">
+                      Choose Avatar for {target.name}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingAvatarSeatKey(null)}
+                      className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#EFE6D8] text-xs font-semibold text-[#3A2E25] hover:text-[#261E18] cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+                  <AvatarPicker
+                    selectedAvatarId={target.avatarId ?? target.botAvatarId ?? ''}
+                    onSelect={(avatarId) => {
+                      if (!avatarId) return;
+                      updateLocalPlayer(idx, { avatarId, botAvatarId: avatarId });
+                      setEditingAvatarSeatKey(null);
+                    }}
+                  />
+                </section>
+              );
+            }
+            return null;
+          })()}
+
         {/* 2-Column Beige Seat Cards Grid (Matches Screenshot image_c92f6561.png) */}
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
           {onlineRoom
@@ -464,13 +551,14 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                     {isYou && onlineRoom.status === 'waiting' && onOnlineUpdateAvatar && (
                       <button
                         type="button"
+                        data-testid="lobby-change-avatar"
                         disabled={isOnlineDisconnected}
                         onClick={() =>
                           setEditingAvatarSeatKey((prev) =>
                             prev === seat.playerId ? null : seat.playerId
                           )
                         }
-                        className="mt-2 px-2.5 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer disabled:opacity-50"
+                        className="mt-2 min-h-[34px] px-3 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer disabled:opacity-50"
                       >
                         {editingAvatarSeatKey === seat.playerId ? 'Close' : 'Change Avatar'}
                       </button>
@@ -563,10 +651,11 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                     {player.type === 'human' && (
                       <button
                         type="button"
+                        data-testid={`lobby-change-avatar-${index}`}
                         onClick={() =>
                           setEditingAvatarSeatKey((prev) => (prev === seatKey ? null : seatKey))
                         }
-                        className="mt-2 px-2.5 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer"
+                        className="mt-2 min-h-[34px] px-3 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer"
                       >
                         {editingAvatarSeatKey === seatKey ? 'Close' : 'Change Avatar'}
                       </button>
@@ -605,79 +694,6 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
             </button>
           ))}
         </div>
-
-        {/* Inline Waiting-Lobby Avatar Picker Panel */}
-        {editingAvatarSeatKey &&
-          (() => {
-            if (onlineRoom && onlineRoom.status === 'waiting') {
-              const yourSeat = onlineRoom.seats.find(
-                (s) => s.playerId === onlineRoom.yourPlayerId && s.playerId === editingAvatarSeatKey
-              );
-              if (!yourSeat || !onOnlineUpdateAvatar) return null;
-              const takenIds = new Set(
-                onlineRoom.seats
-                  .filter((s) => s.playerId !== yourSeat.playerId)
-                  .map((s) => s.avatarId ?? s.botAvatarId)
-                  .filter((id): id is string => Boolean(id))
-              );
-              return (
-                <section className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="font-display text-base font-bold text-[#261E18]">
-                      Choose Avatar for {yourSeat.name}
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() => setEditingAvatarSeatKey(null)}
-                      className="text-xs font-semibold text-[#6E6052] hover:text-[#261E18] cursor-pointer"
-                    >
-                      Done
-                    </button>
-                  </div>
-                  <AvatarPicker
-                    selectedAvatarId={yourSeat.avatarId ?? yourSeat.botAvatarId ?? ''}
-                    takenAvatarIds={takenIds}
-                    onSelect={(avatarId) => {
-                      if (!avatarId) return;
-                      onOnlineUpdateAvatar(avatarId);
-                      setEditingAvatarSeatKey(null);
-                    }}
-                  />
-                </section>
-              );
-            }
-
-            if (localConfig && editingAvatarSeatKey.startsWith('local:')) {
-              const idx = Number(editingAvatarSeatKey.slice('local:'.length));
-              const target = localConfig.players[idx];
-              if (!target || target.type !== 'human') return null;
-              return (
-                <section className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="font-display text-base font-bold text-[#261E18]">
-                      Choose Avatar for {target.name}
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() => setEditingAvatarSeatKey(null)}
-                      className="text-xs font-semibold text-[#6E6052] hover:text-[#261E18] cursor-pointer"
-                    >
-                      Done
-                    </button>
-                  </div>
-                  <AvatarPicker
-                    selectedAvatarId={target.avatarId ?? target.botAvatarId ?? ''}
-                    onSelect={(avatarId) => {
-                      if (!avatarId) return;
-                      updateLocalPlayer(idx, { avatarId, botAvatarId: avatarId });
-                      setEditingAvatarSeatKey(null);
-                    }}
-                  />
-                </section>
-              );
-            }
-            return null;
-          })()}
       </main>
 
       {/* Bottom Sticky Action Footer (Matches Screenshot) */}
