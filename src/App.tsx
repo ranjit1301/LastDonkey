@@ -1117,6 +1117,7 @@ export default function App() {
             gameState={activeGameState}
             onlineRoom={onlineRoom}
             practiceEndedEarly={!onlineRoom && practiceEndedEarly}
+            animationsEnabled={settings.animationsEnabled}
             onLocalPlayAgain={() => startLocalMatch(localLobby)}
             onBackToLobby={() => {
               setPracticeEndedEarly(false);

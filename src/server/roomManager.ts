@@ -14,8 +14,10 @@ import {
   type GameState,
   type PlayerConfig,
 } from '../engine/index.ts';
+import { pickUniqueBotAvatar } from '../lib/botAvatars.ts';
 import type { TurnTimerSeconds } from '../lib/settings.ts';
 import { cloneTrickOutcome } from '../lib/trickHistory.ts';
+import { derivePlayerExpressionStates } from '../lib/facialExpressions.ts';
 import type {
   ClientGameStateView,
   ClientRoomState,
@@ -28,7 +30,6 @@ import type {
   RoomVisibility,
 } from './roomTypes.ts';
 
-const BOT_NAMES = ['Bot Raju', 'Bot Pinky', 'Bot Golu', 'Bot Meera', 'Bot Kabir', 'Bot Priya'];
 const AVATAR_COLORS = ['#E59A00', '#2E6340', '#D95732', '#3A6B8A', '#8B5E83', '#B57435'];
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -404,12 +405,24 @@ export class RoomManager {
             ? [cloneTrickOutcome(room.gameState.lastOutcome)]
             : [];
 
+      const playerExpressions = derivePlayerExpressionStates({
+        playerIds: room.gameState.players.map((p) => p.id),
+        trickHistory: room.gameState.trickHistory,
+        lastOutcome: room.gameState.lastOutcome,
+        phase: room.gameState.phase,
+        donkeyPlayerId: room.gameState.donkeyPlayerId,
+        finishedPlayerIds: room.gameState.players
+          .filter((p) => p.finished)
+          .map((p) => p.id),
+      });
+
       sanitizedGame = {
         ...room.gameState,
         lastOutcome: room.gameState.lastOutcome
           ? cloneTrickOutcome(room.gameState.lastOutcome)
           : null,
         trickHistory: safeTrickHistory,
+        playerExpressions,
         players: room.gameState.players.map((p) => {
           const revealHand =
             p.id === viewerPlayerId ||
@@ -427,6 +440,7 @@ export class RoomManager {
             connected: p.connected,
             consecutiveMissedTurns: p.consecutiveMissedTurns,
             avatarColor: p.avatarColor,
+            ...(p.botAvatarId ? { botAvatarId: p.botAvatarId } : {}),
           };
         }),
       };
@@ -938,12 +952,21 @@ export class RoomManager {
       return { ok: false, error: 'Room Full — cannot add more players.' };
     }
 
+    const usedAvatarIds = room.seats
+      .filter((s) => s.type === 'bot' && s.botAvatarId)
+      .map((s) => s.botAvatarId);
     const usedNamesLower = new Set(room.seats.map((s) => s.name.trim().toLowerCase()));
-    let botName = BOT_NAMES.find((n) => !usedNamesLower.has(n.toLowerCase()));
-    if (!botName) {
+    const pickedAvatar = pickUniqueBotAvatar({
+      usedAvatarIds,
+      usedNames: usedNamesLower,
+      rng: this.opts.rng,
+    });
+
+    let botName = pickedAvatar.name;
+    if (usedNamesLower.has(botName.toLowerCase())) {
       let idx = room.seats.length + 1;
-      while (usedNamesLower.has(`bot ${idx}`)) idx += 1;
-      botName = `Bot ${idx}`;
+      while (usedNamesLower.has(`${pickedAvatar.name.toLowerCase()} ${idx}`)) idx += 1;
+      botName = `${pickedAvatar.name} ${idx}`;
     }
     const botId = `bot_${crypto.randomBytes(4).toString('hex')}`;
 
@@ -952,7 +975,8 @@ export class RoomManager {
       name: botName,
       type: 'bot',
       connected: true,
-      avatarColor: AVATAR_COLORS[room.seats.length % AVATAR_COLORS.length],
+      avatarColor: pickedAvatar.accentColor,
+      botAvatarId: pickedAvatar.id,
       joinedAt: Date.now(),
     });
     this.touchRoom(room);
@@ -1327,6 +1351,7 @@ export class RoomManager {
       name: s.name,
       type: s.type,
       avatarColor: s.avatarColor,
+      ...(s.botAvatarId ? { botAvatarId: s.botAvatarId } : {}),
     }));
 
     room.gameState = createInitialGameState(playerConfigs, {

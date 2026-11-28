@@ -3,16 +3,17 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowUp,
   BookOpen,
-  Bot,
   Eye,
   EyeOff,
   Flag,
   Layers,
   LogOut,
   Settings,
+  Sparkles,
   Trash2,
   Volume2,
   VolumeX,
+  WifiOff,
 } from 'lucide-react';
 import {
   canFinishPracticeSessionEarly,
@@ -27,12 +28,33 @@ import {
   type DifficultyMode,
   type GameState,
 } from '../engine';
+import { PlayerAvatar } from '../components/BotAvatar';
+import { ConfettiBurst } from '../components/CelebrationEffects';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DiscardedCardTracker } from '../components/DiscardedCardTracker';
+import {
+  FailedTrickAnimationOverlay,
+  type FlyingCardTrajectory,
+} from '../components/FailedTrickAnimationOverlay';
 import { MediumAssistBar } from '../components/MediumAssistBar';
 import { PlayerHandTray } from '../components/PlayerHandTray';
 import { PlayingCard } from '../components/PlayingCard';
 import { TrickOutcomeNotification } from '../components/TrickOutcomeNotification';
+import {
+  CALM_FACIAL_STATE,
+  derivePlayerExpressionStates,
+  getReliefEligiblePlayerIds,
+  type PlayerFacialState,
+} from '../lib/facialExpressions';
+import {
+  buildFailedTrickEventKey,
+  buildSuccessTrickEventKey,
+  FAILED_TRICK_TIMING_MS,
+  RELIEF_ANIMATION_TIMING_MS,
+  shouldPlayGameAnimations,
+  type FailedTrickStage,
+  type ReliefAnimationFrame,
+} from '../lib/gameAnimations';
 import {
   resolvePassAndPlayPerspectivePlayer,
   shouldHidePassAndPlayHand,
@@ -66,6 +88,7 @@ interface UnifiedPlayer {
   connected: boolean;
   consecutiveMissedTurns: number;
   avatarColor: string;
+  botAvatarId?: string;
 }
 
 function normalizePlayers(gameState: UnifiedGameState): UnifiedPlayer[] {
@@ -137,6 +160,42 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     useState<LocalTurnTimerState>(EMPTY_LOCAL_TURN_TIMER);
   const firedTimeoutTurnKeyRef = useRef<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Track OS prefers-reduced-motion live so animations automatically disable when requested
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handler = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  const animationsActive = shouldPlayGameAnimations(
+    settings.animationsEnabled,
+    prefersReducedMotion
+  );
+
+  // Authoritative 4-stage Failed Trick animation state (purely visual & non-blocking)
+  const [failedAnimStage, setFailedAnimStage] = useState<FailedTrickStage>('idle');
+  const [failedTrajectories, setFailedTrajectories] = useState<FlyingCardTrajectory[]>([]);
+  const lastAnimatedFailedKeyRef = useRef<string | null>(null);
+
+  // Server-authoritative 4-frame Sigh of Relief animation state on successful tricks (1.68s)
+  const [reliefAnimState, setReliefAnimState] = useState<{
+    frame: ReliefAnimationFrame;
+    eligibleIds: ReadonlySet<string>;
+  }>({ frame: 'idle', eligibleIds: new Set() });
+  const lastAnimatedSuccessKeyRef = useRef<string | null>(null);
+  const reliefTimersRef = useRef<number[]>([]);
+
+  // Lightweight safe-finish / last-card celebration burst
+  const [celebrationLabel, setCelebrationLabel] = useState<string | null>(null);
+  const lastCelebratedKeyRef = useRef<string | null>(null);
 
   const difficulty: DifficultyMode = gameState.difficulty ?? 'easy';
   const players = useMemo(() => normalizePlayers(gameState), [gameState]);
@@ -470,10 +529,300 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
 
   const ledSuit = gameState.currentTrick.ledSuit;
 
+  // Trigger 4-stage Failed Trick animation ONLY from server/engine-confirmed failed trick outcome
+  const failedOutcome =
+    gameState.phase === 'trick_result' && gameState.lastOutcome?.type === 'failed'
+      ? gameState.lastOutcome
+      : null;
+  const failedEventKey = buildFailedTrickEventKey(failedOutcome);
+
+  const failedOutcomeRef = useRef(failedOutcome);
+  failedOutcomeRef.current = failedOutcome;
+
+  useEffect(() => {
+    const activeFailedOutcome = failedOutcomeRef.current;
+    if (!activeFailedOutcome || !failedEventKey || !animationsActive) {
+      setFailedAnimStage('idle');
+      setFailedTrajectories([]);
+      return;
+    }
+
+    if (lastAnimatedFailedKeyRef.current === failedEventKey) {
+      return;
+    }
+    lastAnimatedFailedKeyRef.current = failedEventKey;
+
+    // Measure live DOM centers of center trick cards and target recipient seat/hand for Stage 3
+    const measureTrajectories = (): FlyingCardTrajectory[] => {
+      const targetEl = document.querySelector<HTMLElement>(
+        `[data-player-seat-id="${CSS.escape(activeFailedOutcome.collectorId)}"]`
+      );
+      const targetRect = targetEl?.getBoundingClientRect();
+      const endX = targetRect
+        ? targetRect.left + targetRect.width / 2
+        : window.innerWidth / 2;
+      const endY = targetRect
+        ? targetRect.top + targetRect.height / 2
+        : activeFailedOutcome.collectorId === perspectivePlayer.id
+          ? window.innerHeight - 90
+          : 90;
+
+      const count = activeFailedOutcome.collectedCards.length;
+      return activeFailedOutcome.collectedCards.map((card, idx) => {
+        const cardEl = document.querySelector<HTMLElement>(
+          `[data-trick-card-id="${CSS.escape(card.id)}"]`
+        );
+        const cardRect = cardEl?.getBoundingClientRect();
+        const startX = cardRect
+          ? cardRect.left + cardRect.width / 2
+          : window.innerWidth / 2 + (idx - (count - 1) / 2) * 44;
+        const startY = cardRect ? cardRect.top + cardRect.height / 2 : window.innerHeight * 0.44;
+
+        // Curved lateral arc so cards swoop naturally rather than moving in a stiff line
+        const lateralArc = (idx - (count - 1) / 2) * 28 + (endY > startY ? 26 : -26);
+        const midX = (startX + endX) / 2 + lateralArc;
+        const midY = (startY + endY) / 2 - 28;
+
+        return {
+          card,
+          startX,
+          startY,
+          midX,
+          midY,
+          endX,
+          endY,
+          rotateMid: (idx % 2 === 0 ? -1 : 1) * (10 + (idx % 3) * 4),
+          rotateEnd: (idx % 2 === 0 ? 1 : -1) * 14,
+          delaySec: Math.min(idx * 0.045, 0.22),
+        };
+      });
+    };
+
+    setFailedAnimStage('banner');
+    setFailedTrajectories([]);
+
+    const t2 = window.setTimeout(() => {
+      setFailedAnimStage('reaction');
+    }, FAILED_TRICK_TIMING_MS.stage2ReactionMs);
+
+    const t3 = window.setTimeout(() => {
+      setFailedTrajectories(measureTrajectories());
+      setFailedAnimStage('flying');
+    }, FAILED_TRICK_TIMING_MS.stage3FlyingMs);
+
+    const t4 = window.setTimeout(() => {
+      setFailedAnimStage('finishing');
+      setFailedTrajectories([]);
+    }, FAILED_TRICK_TIMING_MS.stage4FinishingMs);
+
+    const tDone = window.setTimeout(() => {
+      setFailedAnimStage('idle');
+    }, FAILED_TRICK_TIMING_MS.totalDurationMs);
+
+    return () => {
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+      window.clearTimeout(t4);
+      window.clearTimeout(tDone);
+    };
+  }, [failedEventKey, animationsActive, perspectivePlayer.id]);
+
+  // Trigger synchronized 4-frame Sigh of Relief ONLY from server/engine-confirmed successful tricks
+  const successOutcome =
+    gameState.phase === 'trick_result' && gameState.lastOutcome?.type === 'success'
+      ? gameState.lastOutcome
+      : null;
+  const successEventKey = buildSuccessTrickEventKey(successOutcome);
+
+  const successOutcomeRef = useRef(successOutcome);
+  successOutcomeRef.current = successOutcome;
+  const playersRef = useRef(players);
+  playersRef.current = players;
+
+  const clearReliefTimers = () => {
+    for (const id of reliefTimersRef.current) {
+      window.clearTimeout(id);
+    }
+    reliefTimersRef.current = [];
+  };
+
+  // Clear timers strictly on unmount
+  useEffect(() => () => clearReliefTimers(), []);
+
+  // Immediately cancel any running relief animation if animations turn off or a failed trick starts
+  useEffect(() => {
+    if (!animationsActive || failedEventKey) {
+      clearReliefTimers();
+      setReliefAnimState((prev) =>
+        prev.frame === 'idle' ? prev : { frame: 'idle', eligibleIds: new Set() }
+      );
+    }
+  }, [animationsActive, failedEventKey]);
+
+  // Synchronized 1.68s Sigh of Relief sequence for all active (non-finished) players simultaneously
+  useEffect(() => {
+    const activeSuccess = successOutcomeRef.current;
+    if (!activeSuccess || !successEventKey || !animationsActive) {
+      return;
+    }
+    if (lastAnimatedSuccessKeyRef.current === successEventKey) {
+      return;
+    }
+    lastAnimatedSuccessKeyRef.current = successEventKey;
+
+    const eligibleIds = new Set(
+      getReliefEligiblePlayerIds(playersRef.current, activeSuccess)
+    );
+    if (eligibleIds.size === 0) {
+      return;
+    }
+
+    clearReliefTimers();
+    setReliefAnimState({ frame: 'hold', eligibleIds });
+
+    const tExhale = window.setTimeout(() => {
+      setReliefAnimState({ frame: 'exhale', eligibleIds });
+    }, RELIEF_ANIMATION_TIMING_MS.frame1ExhaleMs);
+
+    const tSmile = window.setTimeout(() => {
+      setReliefAnimState({ frame: 'smile', eligibleIds });
+    }, RELIEF_ANIMATION_TIMING_MS.frame2SmileMs);
+
+    const tSettle = window.setTimeout(() => {
+      setReliefAnimState({ frame: 'settle', eligibleIds });
+    }, RELIEF_ANIMATION_TIMING_MS.frame3SettleMs);
+
+    const tDone = window.setTimeout(() => {
+      setReliefAnimState({ frame: 'idle', eligibleIds: new Set() });
+      reliefTimersRef.current = [];
+    }, RELIEF_ANIMATION_TIMING_MS.totalDurationMs);
+
+    reliefTimersRef.current = [tExhale, tSmile, tSettle, tDone];
+  }, [successEventKey, animationsActive]);
+
+  // Reset trick animation dedup keys when starting a fresh match (trick 1)
+  useEffect(() => {
+    if (gameState.currentTrick.trickNumber === 1 && gameState.phase === 'playing') {
+      lastAnimatedFailedKeyRef.current = null;
+      lastAnimatedSuccessKeyRef.current = null;
+      lastCelebratedKeyRef.current = null;
+      clearReliefTimers();
+      setReliefAnimState({ frame: 'idle', eligibleIds: new Set() });
+    }
+  }, [gameState.currentTrick.trickNumber, gameState.phase]);
+
+  // Optional lightweight celebration when a player finishes safe on a trick
+  useEffect(() => {
+    if (!animationsActive) {
+      setCelebrationLabel(null);
+      return;
+    }
+    const outcome = gameState.lastOutcome;
+    if (
+      (gameState.phase === 'trick_result' || gameState.phase === 'finished') &&
+      outcome &&
+      outcome.newlyFinishedIds.length > 0
+    ) {
+      const key = `finish:${outcome.trickNumber}:${outcome.newlyFinishedIds.join(',')}`;
+      if (lastCelebratedKeyRef.current === key) return;
+      lastCelebratedKeyRef.current = key;
+      const names = outcome.newlyFinishedIds
+        .map((id) => players.find((p) => p.id === id)?.name ?? 'Player')
+        .join(' & ');
+      setCelebrationLabel(`${names} Finished Safe!`);
+      const timer = window.setTimeout(() => setCelebrationLabel(null), 1400);
+      return () => window.clearTimeout(timer);
+    }
+  }, [animationsActive, gameState.phase, gameState.lastOutcome, players]);
+
+  // Authoritative facial expressions (server-computed in online mode, trickHistory-derived locally)
+  const playerExpressions = useMemo<Record<string, PlayerFacialState>>(() => {
+    const maybeClientGame = gameState as ClientGameStateView;
+    if (maybeClientGame.playerExpressions) {
+      return maybeClientGame.playerExpressions;
+    }
+    return derivePlayerExpressionStates({
+      playerIds: players.map((p) => p.id),
+      trickHistory: gameState.trickHistory,
+      lastOutcome: gameState.lastOutcome,
+      phase: gameState.phase,
+      donkeyPlayerId: gameState.donkeyPlayerId,
+      finishedPlayerIds: players.filter((p) => p.finished).map((p) => p.id),
+    });
+  }, [gameState, players]);
+
+  const getPlayerFacialState = (player: UnifiedPlayer): PlayerFacialState => {
+    const state = playerExpressions[player.id];
+    if (state) return state;
+    if (player.finished) {
+      return {
+        ...CALM_FACIAL_STATE,
+        expression: 'happy',
+        label: 'Finished Safe',
+      };
+    }
+    return CALM_FACIAL_STATE;
+  };
+
+  const getPlayerStageEffect = (playerId: string): 'none' | 'shock' | 'dizzy' => {
+    if (
+      animationsActive &&
+      failedOutcome &&
+      failedOutcome.collectorId === playerId
+    ) {
+      if (failedAnimStage === 'reaction' || failedAnimStage === 'flying') {
+        return 'shock';
+      }
+      if (failedAnimStage === 'finishing') {
+        return 'dizzy';
+      }
+    }
+    return 'none';
+  };
+
+  const getPlayerReliefFrame = (player: UnifiedPlayer): ReliefAnimationFrame => {
+    if (!animationsActive || player.finished || player.removed) {
+      return 'idle';
+    }
+    if (reliefAnimState.frame !== 'idle' && reliefAnimState.eligibleIds.has(player.id)) {
+      return reliefAnimState.frame;
+    }
+    return 'idle';
+  };
+
+  const getPlayerPenaltyDelta = (playerId: string): number | null => {
+    if (
+      animationsActive &&
+      failedOutcome &&
+      failedOutcome.collectorId === playerId &&
+      failedAnimStage === 'finishing'
+    ) {
+      return failedOutcome.collectedCards.length;
+    }
+    return null;
+  };
+
+  const isSuccessSweepActive =
+    animationsActive &&
+    gameState.phase === 'trick_result' &&
+    gameState.lastOutcome?.type === 'success';
+
+  const isFailedShakeActive =
+    animationsActive &&
+    failedOutcome !== null &&
+    (failedAnimStage === 'banner' || failedAnimStage === 'reaction');
+
+  const isFailedCardsHiddenInFlight =
+    animationsActive && failedOutcome !== null && failedAnimStage === 'flying';
+
+  const collectorName = failedOutcome
+    ? players.find((p) => p.id === failedOutcome.collectorId)?.name ?? 'Player'
+    : '';
+
   return (
     <div className="min-h-screen h-[100dvh] flex flex-col felt-surface overflow-hidden">
       {/* Top Wooden/Forest Header Bar */}
-      <header className="shrink-0 walnut-rail px-2.5 sm:px-5 py-1.5 sm:py-2 flex items-center justify-between gap-1.5 sm:gap-2 z-20">
+      <header className="shrink-0 walnut-rail px-2.5 sm:px-5 py-1.5 sm:py-2 [@media(max-height:500px)]:py-1 flex items-center justify-between gap-1.5 sm:gap-2 z-20">
         {/* Left: Exit Button (Disabled Mid-Trick per Section 10) + Room Code */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
           <button
@@ -632,111 +981,107 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
       {/* Body Wrapper: Table Felt + Desktop Easy Mode Discarded-Card Sidebar */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Main Table Felt Body */}
-        <main className="flex-1 min-w-0 min-h-0 relative flex flex-col justify-between gap-2 px-2.5 sm:px-6 py-2 overflow-y-auto">
-        {/* TOP OPPONENTS GRID — Sleek compact horizontal cards so all 1 to 5 opponents fit with generous breathing room */}
-        <section aria-label="Opponents" className="relative z-10 shrink-0 w-full mx-auto">
-          <div
-            className={
-              opponents.length === 1
-                ? 'grid grid-cols-1 max-w-[220px] mx-auto gap-2'
-                : opponents.length === 2
-                  ? 'grid grid-cols-2 max-w-md mx-auto gap-2'
-                  : opponents.length === 3
-                    ? 'grid grid-cols-3 max-w-2xl mx-auto gap-1.5 sm:gap-2'
-                    : opponents.length === 4
-                      ? 'grid grid-cols-2 sm:grid-cols-4 max-w-4xl mx-auto gap-1.5 sm:gap-2'
-                      : 'grid grid-cols-6 sm:grid-cols-5 max-w-5xl mx-auto gap-1.5 sm:gap-2'
-            }
-          >
-            {opponents.map((opp, idx) => {
+        <main className="flex-1 min-w-0 min-h-0 relative flex flex-col justify-between gap-1.5 sm:gap-2 px-2.5 sm:px-6 py-1.5 sm:py-2 overflow-x-hidden overflow-y-auto">
+        {/* MEDIUM MODE ONLY: Exact Remaining Suit Counts + Occasional Unobtrusive Hint */}
+        {difficulty === 'medium' && (
+          <MediumAssistBar removedCards={gameState.removedCards} hint={mediumHint} />
+        )}
+
+        {/* ORIGINAL TOP OPPONENTS ROW: Flat horizontal opponent seats with fictional bot caricature avatars */}
+        <section
+          aria-label="Opponents"
+          data-testid="original-opponents-row"
+          className="relative z-10 shrink-0 w-full max-w-5xl mx-auto"
+        >
+          <div className="flex items-stretch justify-center gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
+            {opponents.map((opp) => {
               const isTurn =
                 gameState.phase === 'playing' && gameState.currentTurnPlayerId === opp.id;
-              const playedThisTrick = gameState.currentTrick.plays.some(
+              const hasPlayedThisTrick = gameState.currentTrick.plays.some(
                 (tp) => tp.playerId === opp.id
               );
-              const spanClass =
-                opponents.length === 5
-                  ? idx < 3
-                    ? 'col-span-2 sm:col-span-1'
-                    : 'col-span-3 sm:col-span-1'
-                  : '';
+              const facialState = getPlayerFacialState(opp);
+              const stageEffect = getPlayerStageEffect(opp.id);
+              const penaltyDelta = getPlayerPenaltyDelta(opp.id);
+              const isPenalizedHighlight =
+                animationsActive &&
+                failedOutcome?.collectorId === opp.id &&
+                failedAnimStage !== 'idle';
+
+              const cardWidthClass =
+                opponents.length <= 2
+                  ? 'flex-1 max-w-[200px] min-w-[126px]'
+                  : opponents.length === 3
+                    ? 'flex-1 max-w-[180px] min-w-[98px]'
+                    : 'flex-1 max-w-[168px] min-w-[84px] sm:min-w-[116px]';
 
               return (
                 <div
                   key={opp.id}
-                  className={`${spanClass} min-w-0 rounded-xl sm:rounded-2xl transition-all border px-2 py-1.5 sm:px-2.5 sm:py-2 flex flex-row items-center gap-2 text-left ${
-                    opp.removed
-                      ? 'bg-[#122D1C]/50 border-white/10 opacity-55'
-                      : opp.finished
-                        ? 'bg-[#143D24]/75 border-[#86EFAC]/40 opacity-85'
-                        : isTurn
-                          ? 'bg-[#26693D] border-[#F0B429] ring-1 ring-[#F0B429]/60 shadow-[0_0_16px_rgba(240,180,41,0.35)]'
-                          : 'bg-[#174226]/88 border-white/12'
+                  data-player-seat-id={opp.id}
+                  data-active-seat={isTurn ? 'true' : 'false'}
+                  className={`relative rounded-2xl px-2 py-2 sm:px-3.5 sm:py-2.5 flex flex-col items-center text-center transition-all border ${cardWidthClass} ${
+                    isPenalizedHighlight
+                      ? 'bg-[#451717]/95 border-[#F87171] shadow-[0_0_20px_rgba(248,113,113,0.42)]'
+                      : isTurn
+                        ? 'bg-[#1A4E2C]/96 border-[#F5C954] shadow-[0_0_18px_rgba(245,201,84,0.34)]'
+                        : opp.finished
+                          ? 'bg-[#123820]/75 border-[#86EFAC]/30 opacity-85'
+                          : opp.removed
+                            ? 'bg-[#2C1A1A]/75 border-[#F87171]/25 opacity-65'
+                            : 'bg-[#154124]/92 border-white/14'
                   }`}
                 >
-                  <div className="relative shrink-0">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center font-display text-xs sm:text-sm font-bold border-2 ${
-                        isTurn ? 'border-[#F0B429]' : 'border-white/25'
-                      }`}
-                      style={{
-                        backgroundColor: opp.type === 'bot' ? '#244E32' : opp.avatarColor,
-                        color: opp.type === 'bot' ? '#FFFFFF' : '#1E170F',
-                      }}
-                    >
-                      {opp.type === 'bot' ? (
-                        <Bot className="w-4 h-4" />
-                      ) : (
-                        opp.name.slice(0, 1).toUpperCase()
-                      )}
-                    </div>
-                    {isTurn && (
-                      <span
-                        aria-hidden="true"
-                        className="turn-dot-pulse absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-[#F5C954] ring-2 ring-[#26693D]"
-                      />
-                    )}
+                  <PlayerAvatar
+                    name={opp.name}
+                    type={opp.type}
+                    avatarColor={opp.avatarColor}
+                    botAvatarId={opp.botAvatarId}
+                    playerId={opp.id}
+                    size={opponents.length >= 4 ? 'sm' : 'md'}
+                    expression={facialState.expression}
+                    expressionIntensity={facialState.intensity}
+                    failStreak={facialState.consecutiveFailStreak}
+                    reliefFrame={getPlayerReliefFrame(opp)}
+                    stageEffect={stageEffect}
+                    showHumanFace
+                    activeTurn={isTurn}
+                    disconnected={!opp.connected && opp.type === 'human'}
+                    penaltyDelta={penaltyDelta}
+                    animated={animationsActive}
+                  />
+
+                  <div
+                    className="mt-1.5 w-full font-bold text-xs sm:text-sm text-white truncate leading-tight"
+                    title={opp.name}
+                  >
+                    {opp.name}
                   </div>
 
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className="text-xs sm:text-sm font-bold text-white truncate leading-tight"
-                      title={opp.name}
-                    >
-                      {opp.name}
-                    </div>
-
-                    <div className="mt-0.5 text-[11px] font-medium text-[#CFE2D5] tabular-nums flex items-center justify-start gap-1 flex-wrap leading-tight">
-                      {opp.removed ? (
-                        <span className="text-[#FCA5A5]">Removed</span>
-                      ) : opp.finished ? (
-                        <span className="text-[#86EFAC] font-semibold">
-                          Safe · #{opp.finishOrder}
-                        </span>
-                      ) : (
-                        <span>
+                  <div className="mt-0.5 text-[11px] sm:text-xs text-[#C8DFD0] tabular-nums leading-tight flex items-center justify-center gap-1 flex-wrap">
+                    {opp.removed ? (
+                      <span className="text-[#FCA5A5] font-semibold">Removed</span>
+                    ) : opp.finished ? (
+                      <span className="text-[#86EFAC] font-semibold">
+                        Safe #{opp.finishOrder}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="font-semibold text-[#E8F5EC]">
                           {opp.cardCount} {opp.cardCount === 1 ? 'card' : 'cards'}
                         </span>
-                      )}
-
-                      {!opp.finished && !opp.removed && isTurn && (
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-[#F5C954] text-[#1D1508] text-[10px] font-extrabold uppercase tracking-wide">
-                          Turn
-                        </span>
-                      )}
-
-                      {!opp.finished && !opp.removed && playedThisTrick && (
-                        <span className="text-[10px] font-semibold text-[#A7F3D0]">· Played</span>
-                      )}
-                    </div>
-
-                    {!opp.finished &&
-                      !opp.removed &&
-                      (!opp.connected || opp.consecutiveMissedTurns > 0) && (
-                        <div className="mt-0.5 text-[10px] font-semibold text-[#FDE68A] leading-tight">
-                          {!opp.connected ? 'Offline' : `Miss ${opp.consecutiveMissedTurns}/3`}
-                        </div>
-                      )}
+                        {!opp.connected && opp.type === 'human' ? (
+                          <span className="inline-flex items-center gap-0.5 text-[#FCA5A5] font-semibold">
+                            <WifiOff className="w-3 h-3 shrink-0" aria-hidden="true" />
+                            <span>Off</span>
+                          </span>
+                        ) : isTurn ? (
+                          <span className="text-[#F5C954] font-bold">· Turn</span>
+                        ) : hasPlayedThisTrick ? (
+                          <span className="text-[#86EFAC] font-semibold">· Played</span>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 </div>
               );
@@ -744,192 +1089,226 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           </div>
         </section>
 
-        {/* MEDIUM MODE ONLY: Exact Remaining Suit Counts + Occasional Unobtrusive Hint */}
-        {difficulty === 'medium' && (
-          <MediumAssistBar removedCards={gameState.removedCards} hint={mediumHint} />
-        )}
-
-        {/* CENTER BATTLE ZONE: Suit Pill + Played Cards + Single Inline Status / Trick Outcome Slot */}
+        {/* ORIGINAL CENTRAL GREEN-FELT PLAYING AREA (No oval border or rearranged seating) */}
         <section
           aria-label="Current trick"
-          className="relative z-10 flex-1 min-h-0 flex flex-col items-center justify-center gap-2 sm:gap-2.5 py-1"
+          data-testid="original-center-felt"
+          className="grow shrink-0 min-h-[120px] flex flex-col items-center justify-center gap-2 sm:gap-3 py-1 relative z-10"
         >
-          {/* Crisp White Suit Pill */}
-          <div className="px-3.5 py-0.5 rounded-full bg-white text-[#1B1815] shadow-md text-xs sm:text-sm font-bold inline-flex items-center gap-1.5 shrink-0">
+          {/* Led Suit Pill / Leading Cue */}
+          <div className="flex items-center justify-center gap-2 flex-wrap">
             {ledSuit ? (
-              <>
-                <span>Suit:</span>
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-[#FAF7F0] text-[#1D1B18] px-3.5 py-1 text-xs sm:text-sm font-bold shadow-[0_6px_16px_rgba(0,0,0,0.28)] border border-black/10">
+                <span className="text-[#5C5347] font-semibold">Suit:</span>
                 <span
-                  className={`text-base leading-none ${isRedSuit(ledSuit) ? 'text-[#C81E1E]' : 'text-[#141A21]'}`}
+                  className={`text-base sm:text-lg leading-none ${
+                    isRedSuit(ledSuit) ? 'text-[#C81E1E]' : 'text-[#141A21]'
+                  }`}
                 >
                   {SUIT_SYMBOLS[ledSuit]}
                 </span>
-              </>
-            ) : (
-              <span>Trick {gameState.currentTrick.trickNumber} · Lead Suit</span>
-            )}
-          </div>
-
-          {/* Center Played Cards */}
-          <div className="w-full max-w-3xl flex flex-wrap items-center justify-center gap-2 sm:gap-3 min-h-[80px] sm:min-h-[96px]">
-            {gameState.currentTrick.plays.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-white/25 bg-black/15 px-5 py-3.5 text-center text-xs sm:text-sm text-[#DCEBE0]">
-                {gameState.isFirstTurnOfGame
-                  ? 'Ace of Spades (A♠) leads Trick 1'
-                  : `${activeTurnPlayer?.name ?? 'Leader'} starts Trick ${gameState.currentTrick.trickNumber}`}
+                <span className="hidden sm:inline text-xs font-bold text-[#261E18]">
+                  {SUIT_NAMES[ledSuit]}
+                </span>
               </div>
             ) : (
-              <AnimatePresence initial={false}>
-                {gameState.currentTrick.plays.map((tp) => {
-                  const owner = players.find((p) => p.id === tp.playerId);
-                  const isHighest = highestLedPlay?.card.id === tp.card.id;
-                  const isOffSuit = ledSuit !== null && tp.card.suit !== ledSuit;
-                  const cardSize = gameState.currentTrick.plays.length >= 4 ? 'sm' : 'md';
-
-                  return (
-                    <motion.div
-                      key={tp.card.id}
-                      initial={{ opacity: 0, y: 14, scale: 0.9 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                      className="flex flex-col items-center gap-1"
-                    >
-                      <PlayingCard
-                        card={tp.card}
-                        size={cardSize}
-                        highlighted={difficulty !== 'hard' && isHighest}
-                      />
-                      <span className="text-[11px] font-semibold text-white/95 max-w-[74px] sm:max-w-[84px] truncate">
-                        {owner?.name ?? 'Player'}
-                      </span>
-                      {isOffSuit && (
-                        <span className="text-[10px] font-bold text-[#FCA5A5] leading-none">
-                          Cut!
-                        </span>
-                      )}
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-[#133820]/90 border border-white/15 px-3.5 py-1 text-xs font-semibold text-[#DCECE1] tabular-nums">
+                <Sparkles className="w-3.5 h-3.5 text-[#F5C954] shrink-0" aria-hidden="true" />
+                <span>
+                  {gameState.isFirstTurnOfGame
+                    ? 'Trick 1 · Play A♠ to lead'
+                    : `Trick ${gameState.currentTrick.trickNumber} · ${
+                        activeTurnPlayer ? `${activeTurnPlayer.name} leads` : 'Open lead'
+                      }`}
+                </span>
+              </div>
             )}
           </div>
 
-          {/* Single Clean Inline Status Slot (Trick Outcome OR Turn Indicator — never stacked/overlapping!) */}
-          <AnimatePresence mode="wait">
-            {gameState.phase === 'trick_result' && gameState.lastOutcome ? (
-              <TrickOutcomeNotification
-                key={`trick-outcome-${gameState.lastOutcome.trickNumber}`}
-                outcome={gameState.lastOutcome}
-                players={players}
-                autoAdvance={isOnline ? true : settings.autoAdvanceTricks}
-                durationMs={trickNotificationDurationMs}
-                isServerControlled={isOnline}
-                onContinue={isOnline ? undefined : onContinueTrick}
-              />
-            ) : turnState.turnBanner.showYourTurnHighlight ? (
-              <div
-                key="your-turn-banner"
-                role="status"
-                aria-live="polite"
-                data-testid="your-turn-banner"
-                className="w-full max-w-lg rounded-2xl bg-gradient-to-r from-[#F5B700] via-[#F0A500] to-[#F5B700] border-2 border-[#FFF3BF] text-[#1A1205] px-3.5 py-2 shadow-[0_8px_24px_-4px_rgba(245,183,0,0.48)] shrink-0"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
+          {/* Played Cards on Open Green Felt */}
+          <div className="w-full max-w-4xl flex items-end justify-center gap-2 sm:gap-3.5 flex-wrap px-1 min-h-[96px] sm:min-h-[122px]">
+            {gameState.currentTrick.plays.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-white/18 bg-[#123820]/35 px-5 py-4 text-xs sm:text-sm text-[#C8DFD0]/85 text-center">
+                {gameState.isFirstTurnOfGame
+                  ? 'Waiting for the Ace of Spades (A♠) to start the match'
+                  : 'Waiting for the first card of this trick'}
+              </div>
+            ) : (
+              gameState.currentTrick.plays.map((play) => {
+                const owner = players.find((p) => p.id === play.playerId);
+                const isHighest = highestLedPlay?.card.id === play.card.id;
+                const isOffSuitCut =
+                  failedOutcome !== null && failedOutcome.offSuitPlay.card.id === play.card.id;
+                const isFailedCard = failedOutcome !== null;
+
+                return (
+                  <motion.div
+                    key={`${gameState.currentTrick.trickNumber}-${play.card.id}`}
+                    data-trick-card-id={play.card.id}
+                    initial={animationsActive ? { opacity: 0, y: 12, scale: 0.92 } : false}
+                    animate={{
+                      opacity: isFailedCardsHiddenInFlight ? 0.16 : 1,
+                      y: 0,
+                      scale: isFailedCardsHiddenInFlight ? 0.88 : 1,
+                    }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                    className={`flex flex-col items-center gap-1 ${
+                      isFailedShakeActive
+                        ? 'failed-trick-card-shake'
+                        : isSuccessSweepActive
+                          ? 'trick-sweep-success'
+                          : ''
+                    }`}
+                  >
+                    <div
+                      className={`rounded-xl transition-shadow ${
+                        isOffSuitCut
+                          ? 'ring-2 ring-[#F87171] shadow-[0_0_18px_rgba(248,113,113,0.75)]'
+                          : isFailedCard
+                            ? 'ring-2 ring-[#FBBF24]/90 shadow-[0_0_14px_rgba(251,191,36,0.5)]'
+                            : ''
+                      }`}
+                    >
+                      <PlayingCard
+                        card={play.card}
+                        size="sm"
+                        highlighted={!isFailedCard && isHighest}
+                      />
+                    </div>
                     <span
-                      aria-hidden="true"
-                      className="turn-dot-pulse w-2.5 h-2.5 rounded-full bg-[#1B4D2B] ring-2 ring-[#FFF6D6] shrink-0"
-                    />
-                    <span className="font-display font-extrabold text-sm sm:text-base tracking-wide uppercase shrink-0">
-                      {turnState.turnBanner.headline}
+                      className="text-[11px] sm:text-xs font-semibold text-[#EAF4ED] max-w-[74px] sm:max-w-[88px] truncate text-center drop-shadow-xs"
+                      title={owner?.name ?? 'Player'}
+                    >
+                      {owner?.name ?? 'Player'}
                     </span>
-                    <span className="hidden sm:inline text-xs font-semibold text-[#261A07]/90 truncate">
-                      · {turnState.turnBanner.subtext}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {perspectivePlayer.consecutiveMissedTurns > 0 && (
-                      <span className="text-[11px] font-bold bg-black/15 px-2 py-0.5 rounded-md">
-                        Missed {perspectivePlayer.consecutiveMissedTurns}/3
-                      </span>
-                    )}
-                    {displaySecondsLeft !== null && (
+                  </motion.div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Dedicated Non-Overlapping Status / Turn / Trick Outcome Banner Slot */}
+          <div className="w-full flex justify-center px-1">
+            <AnimatePresence mode="wait">
+              {gameState.phase === 'trick_result' && gameState.lastOutcome ? (
+                <TrickOutcomeNotification
+                  key={`trick-outcome-${gameState.lastOutcome.trickNumber}`}
+                  outcome={gameState.lastOutcome}
+                  players={players}
+                  autoAdvance={isOnline ? true : settings.autoAdvanceTricks}
+                  durationMs={trickNotificationDurationMs}
+                  isServerControlled={isOnline}
+                  onContinue={isOnline ? undefined : onContinueTrick}
+                />
+              ) : turnState.turnBanner.showYourTurnHighlight ? (
+                <div
+                  key="your-turn-banner"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="your-turn-banner"
+                  className="w-full max-w-lg rounded-2xl bg-gradient-to-r from-[#F5B700] via-[#F0A500] to-[#F5B700] border-2 border-[#FFF3BF] text-[#1A1205] px-3.5 py-2 shadow-[0_8px_24px_-4px_rgba(245,183,0,0.48)] shrink-0"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <span
-                        aria-label={`${displaySecondsLeft} seconds remaining`}
-                        className={`font-mono font-bold text-xs px-2.5 py-0.5 rounded-full tabular-nums ${
-                          displaySecondsLeft <= 5
-                            ? 'bg-[#991B1B] text-white'
-                            : 'bg-[#1D1508]/90 text-[#FFF4CC]'
-                        }`}
-                      >
+                        aria-hidden="true"
+                        className="turn-dot-pulse w-2.5 h-2.5 rounded-full bg-[#1B4D2B] ring-2 ring-[#FFF6D6] shrink-0"
+                      />
+                      <span className="font-display font-extrabold text-sm sm:text-base tracking-wide uppercase shrink-0">
+                        {turnState.turnBanner.headline}
+                      </span>
+                      <span className="hidden sm:inline text-xs font-semibold text-[#261A07]/90 truncate">
+                        · {turnState.turnBanner.subtext}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {perspectivePlayer.consecutiveMissedTurns > 0 && (
+                        <span className="text-[11px] font-bold bg-black/15 px-2 py-0.5 rounded-md">
+                          Missed {perspectivePlayer.consecutiveMissedTurns}/3
+                        </span>
+                      )}
+                      {displaySecondsLeft !== null && (
+                        <span
+                          aria-label={`${displaySecondsLeft} seconds remaining`}
+                          className={`font-mono font-bold text-xs px-2.5 py-0.5 rounded-full tabular-nums ${
+                            displaySecondsLeft <= 5
+                              ? 'bg-[#991B1B] text-white'
+                              : 'bg-[#1D1508]/90 text-[#FFF4CC]'
+                          }`}
+                        >
+                          {displaySecondsLeft}s
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <p className="sm:hidden text-xs font-semibold mt-0.5 leading-snug text-[#261A07]">
+                    {turnState.turnBanner.subtext}
+                  </p>
+                </div>
+              ) : turnState.turnBanner.mode === 'reconnecting_your_turn' ? (
+                <div
+                  key="reconnecting-banner"
+                  role="status"
+                  aria-live="polite"
+                  className="w-full max-w-md px-4 py-1.5 rounded-2xl bg-[#2E2410]/95 border border-[#F0B429]/55 text-[#FEF3C7] text-center shrink-0"
+                >
+                  <div className="text-xs sm:text-sm font-bold">{turnState.turnBanner.headline}</div>
+                  <p className="text-[11px] text-[#FDE68A]/90">{turnState.turnBanner.subtext}</p>
+                </div>
+              ) : turnState.turnBanner.mode === 'other_turn' ? (
+                <div
+                  key="other-turn-banner"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="other-turn-banner"
+                  className="w-full max-w-md px-3.5 py-1.5 rounded-2xl bg-[#13361F]/92 border border-white/18 text-[#E5F2E9] shrink-0"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        aria-hidden="true"
+                        className="turn-dot-pulse w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{
+                          backgroundColor: turnState.turnBanner.activePlayerColor ?? '#F5C954',
+                        }}
+                      />
+                      <span className="font-display font-bold text-xs sm:text-sm text-white truncate">
+                        {turnState.turnBanner.headline}
+                      </span>
+                      <span className="hidden sm:inline text-xs text-[#CFE2D5] truncate">
+                        · {turnState.turnBanner.subtext}
+                      </span>
+                    </div>
+                    {displaySecondsLeft !== null && activeTurnPlayer?.type === 'human' && (
+                      <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-full bg-black/25 text-[#F5C954] tabular-nums shrink-0">
                         {displaySecondsLeft}s
                       </span>
                     )}
                   </div>
+                  <p className="sm:hidden text-[11px] text-[#CFE2D5] mt-0.5 leading-snug">
+                    {turnState.turnBanner.subtext}
+                  </p>
                 </div>
-                <p className="sm:hidden text-xs font-semibold mt-0.5 leading-snug text-[#261A07]">
-                  {turnState.turnBanner.subtext}
-                </p>
-              </div>
-            ) : turnState.turnBanner.mode === 'reconnecting_your_turn' ? (
-              <div
-                key="reconnecting-banner"
-                role="status"
-                aria-live="polite"
-                className="w-full max-w-md px-4 py-1.5 rounded-2xl bg-[#2E2410]/95 border border-[#F0B429]/55 text-[#FEF3C7] text-center shrink-0"
-              >
-                <div className="text-xs sm:text-sm font-bold">{turnState.turnBanner.headline}</div>
-                <p className="text-[11px] text-[#FDE68A]/90">{turnState.turnBanner.subtext}</p>
-              </div>
-            ) : turnState.turnBanner.mode === 'other_turn' ? (
-              <div
-                key="other-turn-banner"
-                role="status"
-                aria-live="polite"
-                data-testid="other-turn-banner"
-                className="w-full max-w-md px-3.5 py-1.5 rounded-2xl bg-[#13361F]/92 border border-white/18 text-[#E5F2E9] shrink-0"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span
-                      aria-hidden="true"
-                      className="turn-dot-pulse w-2.5 h-2.5 rounded-full shrink-0"
-                      style={{
-                        backgroundColor: turnState.turnBanner.activePlayerColor ?? '#F5C954',
-                      }}
-                    />
-                    <span className="font-display font-bold text-xs sm:text-sm text-white truncate">
-                      {turnState.turnBanner.headline}
-                    </span>
-                    <span className="hidden sm:inline text-xs text-[#CFE2D5] truncate">
-                      · {turnState.turnBanner.subtext}
-                    </span>
-                  </div>
-                  {displaySecondsLeft !== null && activeTurnPlayer?.type === 'human' && (
-                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-full bg-black/25 text-[#F5C954] tabular-nums shrink-0">
-                      {displaySecondsLeft}s
-                    </span>
-                  )}
+              ) : (
+                <div
+                  key="fallback-status"
+                  role="status"
+                  aria-live="polite"
+                  className="px-4 py-1.5 rounded-xl bg-[#13361F]/90 border border-white/15 text-xs sm:text-sm text-[#E5F2E9] text-center max-w-md shrink-0"
+                >
+                  {turnState.turnBanner.headline}
                 </div>
-                <p className="sm:hidden text-[11px] text-[#CFE2D5] mt-0.5 leading-snug">
-                  {turnState.turnBanner.subtext}
-                </p>
-              </div>
-            ) : (
-              <div
-                key="fallback-status"
-                role="status"
-                aria-live="polite"
-                className="px-4 py-1.5 rounded-xl bg-[#13361F]/90 border border-white/15 text-xs sm:text-sm text-[#E5F2E9] text-center max-w-md shrink-0"
-              >
-                {turnState.turnBanner.headline}
-              </div>
-            )}
-          </AnimatePresence>
+              )}
+            </AnimatePresence>
+          </div>
         </section>
 
-        {/* BOTTOM ZONE: Fanned Hand + Bottom Play Footer (Matches Screenshot!) */}
-        <section aria-label="Your hand" className="relative z-20 shrink-0 w-full max-w-4xl mx-auto">
+        {/* LOCAL PLAYER ZONE — Preserved Horizontal Hand Tray + Bottom Play Footer */}
+        <section
+          aria-label="Your hand"
+          data-player-seat-id={perspectivePlayer.id}
+          className="relative z-20 shrink-0 w-full max-w-4xl mx-auto"
+        >
           {perspectivePlayer.removed ? (
             <div className="rounded-2xl bg-[#361414]/90 border border-[#E05252]/40 p-4 text-center text-sm text-[#FDE8E8]">
               You were removed from this ongoing game after 3 consecutive missed turns. You can join
@@ -996,29 +1375,60 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
 
               {/* Bottom Footer Bar: Player Name, Turn Status & Prominent Play Button */}
               <div className="mt-1 flex items-center justify-between gap-2.5 sm:gap-4 px-1">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm sm:text-base font-bold text-white truncate">
-                      {perspectivePlayer.name}:{' '}
-                      <span className="tabular-nums">{perspectivePlayer.cardCount}</span>
-                    </span>
-                    {turnState.canActNow && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F5C954] text-[#1A1205] text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider shadow-sm shrink-0">
-                        <span
-                          aria-hidden="true"
-                          className="turn-dot-pulse w-1.5 h-1.5 rounded-full bg-[#1B4D2B]"
-                        />
-                        Your Turn
+                <div className="min-w-0 flex-1 flex items-center gap-2.5">
+                  {/* Local player avatar showing real facial expressions & consecutive-failure streaks */}
+                  {(() => {
+                    const localFacial = getPlayerFacialState(perspectivePlayer);
+                    const localStageEffect = getPlayerStageEffect(perspectivePlayer.id);
+                    return (
+                      <PlayerAvatar
+                        name={perspectivePlayer.name}
+                        type={perspectivePlayer.type}
+                        avatarColor={perspectivePlayer.avatarColor}
+                        botAvatarId={perspectivePlayer.botAvatarId}
+                        playerId={perspectivePlayer.id}
+                        size="sm"
+                        expression={localFacial.expression}
+                        expressionIntensity={localFacial.intensity}
+                        failStreak={localFacial.consecutiveFailStreak}
+                        reliefFrame={getPlayerReliefFrame(perspectivePlayer)}
+                        stageEffect={localStageEffect}
+                        showHumanFace
+                        activeTurn={turnState.canActNow}
+                        penaltyDelta={getPlayerPenaltyDelta(perspectivePlayer.id)}
+                        animated={animationsActive}
+                      />
+                    );
+                  })()}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="text-sm sm:text-base font-bold text-white truncate"
+                        title={perspectivePlayer.name}
+                      >
+                        {perspectivePlayer.name}
                       </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-[#C4DEC9]">
-                    {perspectivePlayer.cardCount === 1 ? 'card' : 'cards'}
-                    {turnState.canActNow && (
-                      <span className="ml-1.5 text-[#FDE68A] font-semibold">
-                        · {turnState.legalCards.length} playable
+                      {turnState.canActNow && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#F5C954] text-[#1A1205] text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider shadow-sm shrink-0">
+                          <span
+                            aria-hidden="true"
+                            className="turn-dot-pulse w-1.5 h-1.5 rounded-full bg-[#1B4D2B]"
+                          />
+                          Your Turn
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-[#C4DEC9] tabular-nums whitespace-nowrap">
+                      <span className="font-semibold text-[#E8F5EC]">
+                        {perspectivePlayer.cardCount}{' '}
+                        {perspectivePlayer.cardCount === 1 ? 'card' : 'cards'}
                       </span>
-                    )}
+                      {turnState.canActNow && (
+                        <span className="ml-1.5 text-[#FDE68A] font-semibold">
+                          · {turnState.legalCards.length} playable
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -1209,6 +1619,18 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
           </div>
         </div>
       )}
+      {/* Non-Blocking 4-Stage Failed Trick Animation Overlay */}
+      {animationsActive && (
+        <FailedTrickAnimationOverlay
+          outcome={failedOutcome}
+          stage={failedAnimStage}
+          collectorName={collectorName}
+          trajectories={failedTrajectories}
+        />
+      )}
+
+      {/* Lightweight Safe-Finish Celebration Confetti */}
+      <ConfettiBurst active={Boolean(animationsActive && celebrationLabel)} label={celebrationLabel} />
     </div>
   );
 };

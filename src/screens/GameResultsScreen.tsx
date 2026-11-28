@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Check, Clock, Home, Play, RotateCcw, Trophy, Users, X } from 'lucide-react';
+import { PlayerAvatar } from '../components/BotAvatar';
+import { ConfettiBurst } from '../components/CelebrationEffects';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DonkeyEmblem } from '../components/DonkeyEmblem';
 import { PlayingCard } from '../components/PlayingCard';
 import { TrickHistorySection } from '../components/TrickHistorySection';
 import { DIFFICULTY_META, sortHand, type GameState } from '../engine';
+import { shouldPlayGameAnimations } from '../lib/gameAnimations';
 import { shouldUseCompactResultsHand } from '../lib/handLayout';
 import type { ConnectionStatusInfo } from '../lib/multiplayerClient';
 import type { ClientGameStateView, ClientRoomState } from '../server/roomTypes';
@@ -13,6 +16,7 @@ interface GameResultsScreenProps {
   gameState: GameState | ClientGameStateView;
   onlineRoom?: ClientRoomState | null;
   practiceEndedEarly?: boolean;
+  animationsEnabled?: boolean;
   onLocalPlayAgain?: () => void;
   onBackToLobby?: () => void;
   onMainMenu: () => void;
@@ -28,6 +32,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
   gameState,
   onlineRoom,
   practiceEndedEarly = false,
+  animationsEnabled = true,
   onLocalPlayAgain,
   onBackToLobby,
   onMainMenu,
@@ -38,6 +43,22 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
   onRetryReconnect,
 }) => {
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [showWinConfetti, setShowWinConfetti] = useState(false);
+
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handler = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  const animationsActive = shouldPlayGameAnimations(animationsEnabled, prefersReducedMotion);
 
   useEffect(() => {
     if (!onlineRoom?.rematch) return;
@@ -84,6 +105,22 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
       : 0;
   const isRematchWindowOpen = rematchSecondsLeft !== null && rematchSecondsLeft > 0;
 
+  const viewerPlayer = onlineRoom
+    ? gameState.players.find((p) => p.id === onlineRoom.yourPlayerId) ?? null
+    : humanPlayer;
+  const viewerFinishedSafe =
+    Boolean(viewerPlayer?.finished) && viewerPlayer?.id !== gameState.donkeyPlayerId;
+
+  useEffect(() => {
+    if (!animationsActive || !viewerFinishedSafe) {
+      setShowWinConfetti(false);
+      return;
+    }
+    setShowWinConfetti(true);
+    const timer = window.setTimeout(() => setShowWinConfetti(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [animationsActive, viewerFinishedSafe]);
+
   return (
     <div className="min-h-screen cream-surface overflow-x-hidden flex flex-col">
       <header className="w-full max-w-3xl mx-auto px-4 sm:px-6 pt-5 pb-3 flex items-center justify-between gap-2">
@@ -123,7 +160,27 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
           </section>
         ) : (
           <section className="rounded-3xl felt-surface p-6 sm:p-8 text-center flex flex-col items-center shadow-lg">
-            <DonkeyEmblem size={96} className="drop-shadow-[0_10px_18px_rgba(0,0,0,0.4)]" />
+            {donkeyPlayer ? (
+              <div className="mt-4 flex flex-col items-center">
+                <PlayerAvatar
+                  name={donkeyPlayer.name}
+                  type={donkeyPlayer.type}
+                  avatarColor={donkeyPlayer.avatarColor}
+                  botAvatarId={donkeyPlayer.botAvatarId}
+                  playerId={donkeyPlayer.id}
+                  size="xl"
+                  expression="donkey"
+                  expressionIntensity={3}
+                  showHumanFace
+                  animated={animationsActive}
+                />
+                <span className="mt-2.5 inline-flex items-center gap-1 rounded-full bg-[#3A1414]/90 border border-[#F87171]/60 px-3 py-0.5 text-[11px] font-extrabold uppercase tracking-wider text-[#FECACA] shadow-sm">
+                  Last Donkey
+                </span>
+              </div>
+            ) : (
+              <DonkeyEmblem size={96} className="drop-shadow-[0_10px_18px_rgba(0,0,0,0.4)]" />
+            )}
 
             <p className="mt-3 text-xs sm:text-sm font-semibold text-[#F5C954]">
               {donkeyPlayer ? 'The Last Donkey Is' : 'Simultaneous Finish'}
@@ -193,7 +250,18 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                     key={seat.playerId}
                     className="min-w-0 rounded-xl bg-white/80 border border-[#E7D4A3] px-3 py-2 flex items-center justify-between gap-2 text-xs"
                   >
-                    <span className="font-semibold text-[#261E18] truncate">{seat.name}</span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <PlayerAvatar
+                        name={seat.name}
+                        type={seat.type}
+                        avatarColor={seat.avatarColor}
+                        botAvatarId={seat.botAvatarId}
+                        playerId={seat.playerId}
+                        size="xs"
+                        animated={false}
+                      />
+                      <span className="font-semibold text-[#261E18] truncate">{seat.name}</span>
+                    </div>
                     <span
                       className={`font-bold shrink-0 inline-flex items-center gap-1 ${
                         vote === 'accepted'
@@ -270,9 +338,13 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                   gameState.finishGroups
                     .slice(0, groupIdx)
                     .reduce((sum, g) => sum + g.length, 0) + 1;
-                const names = group
-                  .map((id) => gameState.players.find((p) => p.id === id)?.name ?? 'Player')
-                  .join(' & ');
+                const groupPlayers = group
+                  .map((id) => gameState.players.find((p) => p.id === id))
+                  .filter((p): p is (typeof gameState.players)[number] => Boolean(p));
+                const names =
+                  groupPlayers.length > 0
+                    ? groupPlayers.map((p) => p.name).join(' & ')
+                    : 'Player';
 
                 return (
                   <div
@@ -280,9 +352,23 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                     className="py-2.5 flex items-center justify-between gap-3 text-sm"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="font-mono font-bold text-xs text-[#365B40] w-8 tabular-nums">
+                      <span className="font-mono font-bold text-xs text-[#365B40] w-8 tabular-nums shrink-0">
                         #{rankNumber}
                       </span>
+                      <div className="flex items-center -space-x-1.5 shrink-0">
+                        {groupPlayers.map((p) => (
+                          <PlayerAvatar
+                            key={p.id}
+                            name={p.name}
+                            type={p.type}
+                            avatarColor={p.avatarColor}
+                            botAvatarId={p.botAvatarId}
+                            playerId={p.id}
+                            size="xs"
+                            animated={false}
+                          />
+                        ))}
+                      </div>
                       <span className="font-semibold text-[#261E18] truncate">{names}</span>
                     </div>
                     <span className="text-xs font-semibold text-[#365B40] shrink-0">
@@ -295,7 +381,18 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
               {donkeyPlayer && !isEarlyPracticeFinish && (
                 <div className="py-2.5 flex items-center justify-between gap-3 text-sm">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="font-mono font-bold text-xs text-[#D95732] w-8">Last</span>
+                    <span className="font-mono font-bold text-xs text-[#D95732] w-8 shrink-0">
+                      Last
+                    </span>
+                    <PlayerAvatar
+                      name={donkeyPlayer.name}
+                      type={donkeyPlayer.type}
+                      avatarColor={donkeyPlayer.avatarColor}
+                      botAvatarId={donkeyPlayer.botAvatarId}
+                      playerId={donkeyPlayer.id}
+                      size="xs"
+                      animated={false}
+                    />
                     <span className="font-bold text-[#261E18] truncate">{donkeyPlayer.name}</span>
                   </div>
                   <span className="text-xs font-bold text-[#D95732] shrink-0 tabular-nums">
@@ -311,7 +408,18 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                     className="py-2.5 flex items-center justify-between gap-3 text-sm text-[#6E6052]"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="font-mono font-semibold text-xs text-[#8A7A6B] w-8">—</span>
+                      <span className="font-mono font-semibold text-xs text-[#8A7A6B] w-8 shrink-0">
+                        —
+                      </span>
+                      <PlayerAvatar
+                        name={p.name}
+                        type={p.type}
+                        avatarColor={p.avatarColor}
+                        botAvatarId={p.botAvatarId}
+                        playerId={p.id}
+                        size="xs"
+                        animated={false}
+                      />
                       <span className="font-medium text-[#4A3F35] truncate">{p.name}</span>
                     </div>
                     <span className="text-xs font-semibold text-[#7A6B5C] shrink-0 tabular-nums">
@@ -328,7 +436,19 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                     key={p.id}
                     className="py-2.5 flex items-center justify-between gap-3 text-xs text-[#736456]"
                   >
-                    <span>{p.name}</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <PlayerAvatar
+                        name={p.name}
+                        type={p.type}
+                        avatarColor={p.avatarColor}
+                        botAvatarId={p.botAvatarId}
+                        playerId={p.id}
+                        size="xs"
+                        disconnected
+                        animated={false}
+                      />
+                      <span className="truncate">{p.name}</span>
+                    </div>
                     <span>Removed / Exited</span>
                   </div>
                 ))}
@@ -426,6 +546,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
           </button>
         </div>
       </main>
+      <ConfettiBurst active={showWinConfetti} />
     </div>
   );
 };

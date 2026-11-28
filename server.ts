@@ -122,14 +122,78 @@ async function startServer() {
 
   // Mount Vite middleware in dev, or serve static dist in production
   if (!isProduction) {
+    // In dev/preview mode (where HMR & dev SW are disabled), any previously registered
+    // browser Service Worker (/dev-sw.js or /sw.js) would otherwise get an HTML SPA
+    // fallback and stay stuck serving stale cached bundles forever. Serve a tiny
+    // self-unregistering JS worker that clears stale caches and refreshes clients.
+    const devKillSwScript = [
+      "self.addEventListener('install', () => self.skipWaiting());",
+      "self.addEventListener('activate', (event) => {",
+      '  event.waitUntil(',
+      '    caches.keys()',
+      '      .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))',
+      '      .then(() => self.registration.unregister())',
+      '  );',
+      '});',
+    ].join('\n');
+
+    const devCleanupRegisterSwScript = [
+      "if ('serviceWorker' in navigator) {",
+      '  navigator.serviceWorker.getRegistrations().then((regs) => {',
+      '    regs.forEach((reg) => reg.unregister());',
+      '  }).catch(() => {});',
+      '}',
+    ].join('\n');
+
+    app.get(['/sw.js', '/dev-sw.js'], (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(200).send(devKillSwScript);
+    });
+
+    app.get('/registerSW.js', (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(200).send(devCleanupRegisterSwScript);
+    });
+
+    // Never serve index.html (text/html) for stale production Workbox/bundle requests in dev mode
+    app.get(/^\/workbox-[^/]+\.js$/, (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(404).type('text/plain').send('Not found in development mode');
+    });
+
+    app.get('/manifest.webmanifest', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(404).type('application/json').send('{}');
+    });
+
+    app.use('/assets', (req, res, next) => {
+      // Allow legitimate public/assets/* files if present, but block SPA HTML fallback for missing dist bundles
+      const reqPath = req.path.replace(/^\/+/, '');
+      if (/\.(?:js|mjs|css|map)$/i.test(reqPath)) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.status(404).type('text/plain').send('Asset not found in development mode');
+        return;
+      }
+      next();
+    });
+
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
+        allowedHosts: true,
         ws: { server },
         hmr: false,
       },
       appType: 'spa',
+    });
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.includes('.')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+      next();
     });
     app.use(vite.middlewares);
   } else {

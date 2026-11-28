@@ -1,5 +1,12 @@
 import type { DifficultyMode, PlayerConfig } from '../engine/index.ts';
 import type { RoomVisibility } from '../server/roomTypes.ts';
+import {
+  BOT_AVATAR_NAMES,
+  getBotAvatarById,
+  isBotAvatarName,
+  pickUniqueBotAvatar,
+  pickUniqueBotAvatars,
+} from './botAvatars.ts';
 
 export type PlayTapMode = 'confirm' | 'single-tap';
 export type GameSpeed = 'relaxed' | 'normal' | 'fast';
@@ -7,6 +14,7 @@ export type TurnTimerSeconds = 0 | 10 | 15 | 20 | 30;
 
 export interface AppSettings {
   soundEnabled: boolean;
+  animationsEnabled: boolean;
   playTapMode: PlayTapMode;
   sortOrder: 'desc' | 'asc';
   gameSpeed: GameSpeed;
@@ -19,6 +27,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   soundEnabled: true,
+  animationsEnabled: true,
   playTapMode: 'confirm',
   sortOrder: 'desc',
   gameSpeed: 'normal',
@@ -87,7 +96,7 @@ export interface LocalLobbyConfig {
   players: PlayerConfig[];
 }
 
-export const BOT_NAMES = ['Bot Raju', 'Bot Pinky', 'Bot Golu', 'Bot Meera', 'Bot Kabir', 'Bot Priya'];
+export const BOT_NAMES: readonly string[] = BOT_AVATAR_NAMES;
 export const AVATAR_COLORS = ['#E59A00', '#2E6340', '#D95732', '#3A6B8A', '#8B5E83', '#B57435'];
 
 export function generateRoomCode(): string {
@@ -102,10 +111,16 @@ export function generateRoomCode(): string {
 export function buildDefaultPlayers(
   count: number,
   hostName: string,
-  mode: LocalMode
+  mode: LocalMode,
+  rng: () => number = Math.random
 ): PlayerConfig[] {
   const safeHost = hostName.trim() || 'You';
   const clampedCount = Math.max(2, Math.min(6, count));
+  const botProfiles =
+    mode === 'bots'
+      ? pickUniqueBotAvatars(clampedCount - 1, { usedNames: [safeHost], rng })
+      : [];
+
   return Array.from({ length: clampedCount }, (_, idx) => {
     if (idx === 0) {
       return {
@@ -116,11 +131,21 @@ export function buildDefaultPlayers(
       };
     }
     const isHuman = mode === 'pass-and-play';
+    if (isHuman) {
+      return {
+        id: `p${idx + 1}`,
+        name: `Player ${idx + 1}`,
+        type: 'human',
+        avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+      };
+    }
+    const profile = botProfiles[idx - 1];
     return {
       id: `p${idx + 1}`,
-      name: isHuman ? `Player ${idx + 1}` : BOT_NAMES[idx - 1] ?? `Bot ${idx}`,
-      type: isHuman ? 'human' : 'bot',
-      avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+      name: profile.name,
+      type: 'bot',
+      avatarColor: profile.accentColor,
+      botAvatarId: profile.id,
     };
   });
 }
@@ -157,14 +182,48 @@ export function sanitizeLocalLobbyConfig(config: LocalLobbyConfig): LocalLobbyCo
   if (players.length === 0) {
     players = buildDefaultPlayers(MIN_LOCAL_PLAYERS, 'You', 'bots');
   } else if (players.length < MIN_LOCAL_PLAYERS) {
+    const picked = pickUniqueBotAvatar({
+      usedAvatarIds: players.map((p) => p.botAvatarId),
+      usedNames: players.map((p) => p.name),
+    });
     const fallbackBot: PlayerConfig = {
       id: `p${players.length + 1}`,
-      name: BOT_NAMES[0] ?? 'Bot 1',
+      name: picked.name,
       type: 'bot',
-      avatarColor: AVATAR_COLORS[players.length % AVATAR_COLORS.length],
+      avatarColor: picked.accentColor,
+      botAvatarId: picked.id,
     };
     players = [...players, fallbackBot];
   }
+
+  // Ensure every bot seat has a valid unique botAvatarId and human seats do not carry botAvatarId
+  const seenBotAvatarIds = new Set<string>();
+  const allNames = new Set(players.map((p) => p.name.trim().toLowerCase()));
+  players = players.map((p, idx) => {
+    if (p.type !== 'bot') {
+      if (!p.botAvatarId) return p;
+      const { botAvatarId: _removed, ...rest } = p;
+      return {
+        ...rest,
+        avatarColor: p.avatarColor ?? AVATAR_COLORS[idx % AVATAR_COLORS.length],
+      };
+    }
+    const existingProfile = getBotAvatarById(p.botAvatarId);
+    if (existingProfile && !seenBotAvatarIds.has(existingProfile.id)) {
+      seenBotAvatarIds.add(existingProfile.id);
+      return p;
+    }
+    const picked = pickUniqueBotAvatar({
+      usedAvatarIds: seenBotAvatarIds,
+      usedNames: allNames,
+    });
+    seenBotAvatarIds.add(picked.id);
+    return {
+      ...p,
+      botAvatarId: picked.id,
+      avatarColor: p.avatarColor ?? picked.accentColor,
+    };
+  });
 
   return {
     ...config,
@@ -195,8 +254,48 @@ export function updateLocalLobbyPlayer(
         ...player,
         ...patch,
         type: 'human' as const,
+        botAvatarId: undefined,
       };
     }
+
+    const switchingToBot = patch.type === 'bot' && player.type !== 'bot';
+    const switchingToHuman = patch.type === 'human' && player.type !== 'human';
+
+    if (switchingToBot) {
+      const others = config.players.filter((_, i) => i !== idx);
+      const picked = pickUniqueBotAvatar({
+        usedAvatarIds: others.map((p) => p.botAvatarId),
+        usedNames: others.map((p) => p.name),
+      });
+      const isDefaultHumanName = /^player\s+\d+$/i.test(player.name.trim());
+      return {
+        ...player,
+        ...patch,
+        type: 'bot' as const,
+        botAvatarId: patch.botAvatarId ?? picked.id,
+        avatarColor: patch.avatarColor ?? picked.accentColor,
+        name:
+          patch.name !== undefined
+            ? patch.name
+            : isDefaultHumanName || !player.name.trim()
+              ? picked.name
+              : player.name,
+      };
+    }
+
+    if (switchingToHuman) {
+      const { botAvatarId: _removed, ...rest } = player;
+      const shouldResetBotName = patch.name === undefined && isBotAvatarName(player.name);
+      return {
+        ...rest,
+        ...patch,
+        type: 'human' as const,
+        botAvatarId: undefined,
+        avatarColor: patch.avatarColor ?? AVATAR_COLORS[idx % AVATAR_COLORS.length],
+        name: shouldResetBotName ? `Player ${idx + 1}` : (patch.name ?? player.name),
+      };
+    }
+
     return {
       ...player,
       ...patch,
@@ -226,22 +325,29 @@ export function addLocalLobbySeat(config: LocalLobbyConfig): LocalLobbyConfig {
     idNum++;
   }
 
-  let nextName: string;
+  let nextPlayer: PlayerConfig;
   if (isPass) {
     let n = idx + 1;
     while (existingNames.has(`player ${n}`)) n++;
-    nextName = `Player ${n}`;
+    nextPlayer = {
+      id: `p${idNum}`,
+      name: `Player ${n}`,
+      type: 'human',
+      avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+    };
   } else {
-    nextName =
-      BOT_NAMES.find((name) => !existingNames.has(name.toLowerCase())) ?? `Bot ${idNum}`;
+    const picked = pickUniqueBotAvatar({
+      usedAvatarIds: safe.players.map((p) => p.botAvatarId),
+      usedNames: existingNames,
+    });
+    nextPlayer = {
+      id: `p${idNum}`,
+      name: picked.name,
+      type: 'bot',
+      avatarColor: picked.accentColor,
+      botAvatarId: picked.id,
+    };
   }
-
-  const nextPlayer: PlayerConfig = {
-    id: `p${idNum}`,
-    name: nextName,
-    type: isPass ? 'human' : 'bot',
-    avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
-  };
 
   return sanitizeLocalLobbyConfig({
     ...safe,

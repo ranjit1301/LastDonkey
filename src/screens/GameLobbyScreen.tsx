@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { DIFFICULTY_META, getDealingCounts, type PlayerConfig } from '../engine';
+import { PlayerAvatar } from '../components/BotAvatar';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DifficultySelector } from '../components/DifficultySelector';
 import type { ConnectionStatusInfo } from '../lib/multiplayerClient';
@@ -424,20 +425,16 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                       </button>
                     )}
 
-                    {/* Avatar Circle */}
-                    <div
-                      className="w-14 h-14 rounded-full flex items-center justify-center font-display text-xl font-bold text-[#261E18] shadow-xs"
-                      style={{
-                        backgroundColor: seat.type === 'bot' ? '#365B40' : seat.avatarColor,
-                        color: seat.type === 'bot' ? '#FFFFFF' : '#261E18',
-                      }}
-                    >
-                      {seat.type === 'bot' ? (
-                        <Bot className="w-7 h-7" />
-                      ) : (
-                        seat.name.slice(0, 1).toUpperCase()
-                      )}
-                    </div>
+                    {/* Avatar Circle (Fictional Indian caricature for bots; classic initial circle for humans) */}
+                    <PlayerAvatar
+                      name={seat.name}
+                      type={seat.type}
+                      avatarColor={seat.avatarColor}
+                      botAvatarId={seat.botAvatarId}
+                      playerId={seat.playerId}
+                      size="lg"
+                      disconnected={!seat.connected && seat.type === 'human'}
+                    />
 
                     <div className="mt-3 font-bold text-sm sm:text-base text-[#261E18] truncate w-full">
                       {seat.name}
@@ -490,22 +487,14 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                       </button>
                     )}
 
-                    <div
-                      className="w-14 h-14 rounded-full flex items-center justify-center font-display text-xl font-bold shadow-xs"
-                      style={{
-                        backgroundColor:
-                          player.type === 'bot'
-                            ? '#365B40'
-                            : player.avatarColor ?? AVATAR_COLORS[index % 6],
-                        color: player.type === 'bot' ? '#FFFFFF' : '#261E18',
-                      }}
-                    >
-                      {player.type === 'bot' ? (
-                        <Bot className="w-7 h-7" />
-                      ) : (
-                        player.name.slice(0, 1).toUpperCase()
-                      )}
-                    </div>
+                    <PlayerAvatar
+                      name={player.name}
+                      type={player.type}
+                      avatarColor={player.avatarColor ?? AVATAR_COLORS[index % 6]}
+                      botAvatarId={player.botAvatarId}
+                      playerId={player.id}
+                      size="lg"
+                    />
 
                     <input
                       type="text"

@@ -404,7 +404,7 @@ export const PlayerHandTray: React.FC<PlayerHandTrayProps> = ({
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchEnd}
-            className="w-full overflow-x-auto touch-pan-x hand-scrollbar pt-6 sm:pt-7 pb-3 px-2 rounded-lg"
+            className="w-full overflow-x-auto touch-pan-x hand-scrollbar pt-6 sm:pt-7 pb-3 [@media(max-height:500px)]:pt-5 [@media(max-height:500px)]:pb-2 px-2 rounded-lg"
           >
             <div
               ref={stripRef}

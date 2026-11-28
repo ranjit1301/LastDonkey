@@ -116,6 +116,7 @@ export function createInitialGameState(
     connected: true,
     consecutiveMissedTurns: 0,
     avatarColor: cfg.avatarColor ?? DEFAULT_AVATAR_COLORS[index % DEFAULT_AVATAR_COLORS.length],
+    ...(cfg.botAvatarId ? { botAvatarId: cfg.botAvatarId } : {}),
   }));
 
   // Section 5: The player holding A♠ starts the game and must play A♠ first.

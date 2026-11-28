@@ -33,6 +33,8 @@ COPY --from=builder --chown=node:node /app/src/server ./src/server
 COPY --from=builder --chown=node:node /app/src/engine ./src/engine
 COPY --from=builder --chown=node:node /app/src/lib/settings.ts ./src/lib/settings.ts
 COPY --from=builder --chown=node:node /app/src/lib/trickHistory.ts ./src/lib/trickHistory.ts
+COPY --from=builder --chown=node:node /app/src/lib/botAvatars.ts ./src/lib/botAvatars.ts
+COPY --from=builder --chown=node:node /app/src/lib/facialExpressions.ts ./src/lib/facialExpressions.ts
 
 # Ensure non-root runtime user can read all app files and node_modules
 RUN chown -R node:node /app

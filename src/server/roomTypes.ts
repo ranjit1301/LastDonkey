@@ -1,4 +1,5 @@
 import type { Card, DifficultyMode, GameState, PlayerType } from '../engine/index.ts';
+import type { PlayerFacialState } from '../lib/facialExpressions.ts';
 import type { TurnTimerSeconds } from '../lib/settings.ts';
 
 export type RoomVisibility = 'private' | 'public';
@@ -10,6 +11,7 @@ export interface RoomSeat {
   type: PlayerType;
   connected: boolean;
   avatarColor: string;
+  botAvatarId?: string;
   joinedAt: number;
 }
 
@@ -71,10 +73,13 @@ export interface ClientPlayerView {
   connected: boolean;
   consecutiveMissedTurns: number;
   avatarColor: string;
+  botAvatarId?: string;
 }
 
 export interface ClientGameStateView extends Omit<GameState, 'players'> {
   players: ClientPlayerView[];
+  /** Authoritative facial expressions derived from full server trickHistory (zero card-history leakage) */
+  playerExpressions?: Record<string, PlayerFacialState>;
 }
 
 export interface ClientRoomState {

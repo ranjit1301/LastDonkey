@@ -65,6 +65,30 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             </button>
           </div>
 
+          {/* Game Animations */}
+          <div className="p-5 flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-sm sm:text-base font-bold text-[#261E18]">Game Animations</h2>
+              <p className="mt-0.5 text-xs sm:text-sm text-[#6E6052]">
+                Failed-trick card flights, avatar reactions, and celebration effects.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.animationsEnabled}
+              aria-label="Game Animations"
+              onClick={() => patch({ animationsEnabled: !settings.animationsEnabled })}
+              className={`min-h-[40px] px-4 rounded-xl text-xs font-bold transition-colors cursor-pointer shrink-0 ${
+                settings.animationsEnabled
+                  ? 'bg-[#365B40] text-white'
+                  : 'bg-[#E6DAC7] text-[#5C4E41]'
+              }`}
+            >
+              {settings.animationsEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
           {/* Turn Timer */}
           <div className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>

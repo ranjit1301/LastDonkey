@@ -9,9 +9,14 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Smile,
   User,
   Users,
 } from 'lucide-react';
+import {
+  FacialExpressionDemoModal,
+  type ExpressionDemoTab,
+} from '../components/FacialExpressionDemoModal';
 import { PlayingCard } from '../components/PlayingCard';
 import { PWAInstallButton } from '../components/PWAInstallButton';
 import { DIFFICULTY_META, makeCard } from '../engine';
@@ -70,6 +75,16 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   const [joiningRoomCode, setJoiningRoomCode] = useState<string | null>(null);
   const [capacityFilter, setCapacityFilter] = useState<number | 'all'>('all');
   const [openOnlyFilter, setOpenOnlyFilter] = useState(false);
+  const [expressionDemoOpen, setExpressionDemoOpen] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    const demoParam = new URLSearchParams(window.location.search).get('demo');
+    return demoParam === 'expressions' || demoParam === 'relief';
+  });
+  const [expressionDemoTab, setExpressionDemoTab] = useState<ExpressionDemoTab>(() => {
+    if (typeof window === 'undefined') return 'relief';
+    const demoParam = new URLSearchParams(window.location.search).get('demo');
+    return demoParam === 'expressions' ? 'failed' : 'relief';
+  });
 
   const inFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -256,6 +271,19 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             >
               <HelpCircle className="w-4 h-4 text-[#2B211A]" />
               How to Play
+            </button>
+
+            <button
+              type="button"
+              data-testid="open-expression-demo"
+              onClick={() => {
+                setExpressionDemoTab('relief');
+                setExpressionDemoOpen(true);
+              }}
+              className="min-h-[42px] px-3.5 sm:px-4 py-2 rounded-full bg-[#FFF4DC] border border-[#E7C67A] shadow-sm text-xs sm:text-sm font-bold text-[#5A3604] hover:bg-[#FDECC4] transition-colors inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <Smile className="w-4 h-4 text-[#D95732]" />
+              Expression Demo
             </button>
           </div>
 
@@ -642,6 +670,12 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           </section>
         </div>
       </main>
+
+      <FacialExpressionDemoModal
+        open={expressionDemoOpen}
+        initialTab={expressionDemoTab}
+        onClose={() => setExpressionDemoOpen(false)}
+      />
     </div>
   );
 };

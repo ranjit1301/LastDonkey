@@ -46,6 +46,7 @@ export interface PlayerConfig {
   name: string;
   type: PlayerType;
   avatarColor?: string;
+  botAvatarId?: string;
 }
 
 export interface Player {
@@ -60,6 +61,7 @@ export interface Player {
   connected: boolean;
   consecutiveMissedTurns: number;
   avatarColor: string;
+  botAvatarId?: string;
 }
 
 export interface TrickPlay {

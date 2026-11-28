@@ -49,6 +49,28 @@
     );
 }
 
+/* Compact oval-inspired inner card-table felt arena */
+.table-oval-felt {
+  border-radius: 2.25rem;
+  background: radial-gradient(
+    ellipse 86% 80% at 50% 48%,
+    rgba(46, 124, 72, 0.48) 0%,
+    rgba(24, 78, 43, 0.66) 62%,
+    rgba(13, 47, 25, 0.82) 100%
+  );
+  border: 1.5px solid rgba(245, 201, 84, 0.24);
+  box-shadow:
+    inset 0 2px 18px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 4px rgba(255, 255, 255, 0.045),
+    0 10px 26px -12px rgba(0, 0, 0, 0.45);
+}
+
+@media (min-width: 640px) {
+  .table-oval-felt {
+    border-radius: 5.5rem;
+  }
+}
+
 /* Deep wooden / forest navigation header bar for the game table */
 .walnut-rail {
   background: linear-gradient(180deg, #1b4328 0%, #14331e 100%);
@@ -187,12 +209,170 @@ select:focus-visible,
   }
 }
 
+@keyframes failed-trick-card-shake {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  20% {
+    transform: translate3d(-4px, -1px, 0) rotate(-1.8deg);
+  }
+  40% {
+    transform: translate3d(4px, 1px, 0) rotate(1.8deg);
+  }
+  60% {
+    transform: translate3d(-3px, 0, 0) rotate(-1.2deg);
+  }
+  80% {
+    transform: translate3d(2px, 0, 0) rotate(0.8deg);
+  }
+}
+
+@keyframes avatar-shock-bounce {
+  0% {
+    transform: scale(1) translateY(0);
+  }
+  30% {
+    transform: scale(1.14) translateY(-4px);
+  }
+  55% {
+    transform: scale(0.95) translateY(1px);
+  }
+  78% {
+    transform: scale(1.06) translateY(-2px);
+  }
+  100% {
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes avatar-dizzy-wobble {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-7deg);
+  }
+  55% {
+    transform: rotate(6deg);
+  }
+  80% {
+    transform: rotate(-3deg);
+  }
+}
+
+@keyframes trick-sweep-success {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-14px) scale(0.92);
+    opacity: 0.72;
+  }
+}
+
+/* Character-specific compositor-only Sigh of Relief motion curves (1.68s) */
+@keyframes relief-motion-dramatic {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  15% {
+    transform: translate3d(0, -3px, 0) scale(1.06, 1.04);
+  }
+  42% {
+    transform: translate3d(0, 4px, 0) scale(1.03, 0.96);
+  }
+  72% {
+    transform: translate3d(0, -1px, 0) scale(1.02, 1.02);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes relief-motion-graceful {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1);
+  }
+  20% {
+    transform: translate3d(0, -2.5px, 0) rotate(-2deg) scale(1.03);
+  }
+  52% {
+    transform: translate3d(0, 2.5px, 0) rotate(2deg) scale(0.99);
+  }
+  80% {
+    transform: translate3d(0, -0.5px, 0) rotate(-0.8deg) scale(1.01);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1);
+  }
+}
+
+@keyframes relief-motion-swagger {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1);
+  }
+  18% {
+    transform: translate3d(-1px, -2px, 0) rotate(-3deg) scale(1.04);
+  }
+  48% {
+    transform: translate3d(2px, 1.5px, 0) rotate(3deg) scale(1.01);
+  }
+  78% {
+    transform: translate3d(0, -1px, 0) rotate(-1deg) scale(1.02);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1);
+  }
+}
+
+@keyframes relief-motion-calm {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  22% {
+    transform: translate3d(0, -2px, 0) scale(1.035);
+  }
+  55% {
+    transform: translate3d(0, 2px, 0) scale(0.985);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .turn-area-active {
     animation: turn-glow-breathe 2.4s ease-in-out infinite;
   }
   .turn-dot-pulse {
     animation: turn-dot-breathe 1.6s ease-in-out infinite;
+  }
+  .failed-trick-card-shake {
+    animation: failed-trick-card-shake 0.34s ease-in-out both;
+  }
+  .avatar-shock-bounce {
+    animation: avatar-shock-bounce 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .avatar-dizzy-wobble {
+    animation: avatar-dizzy-wobble 0.48s ease-in-out both;
+  }
+  .trick-sweep-success {
+    animation: trick-sweep-success 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.45s forwards;
+  }
+  .avatar-relief-dramatic {
+    animation: relief-motion-dramatic 1.68s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .avatar-relief-graceful {
+    animation: relief-motion-graceful 1.68s ease-in-out both;
+  }
+  .avatar-relief-swagger {
+    animation: relief-motion-swagger 1.68s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .avatar-relief-calm {
+    animation: relief-motion-calm 1.68s ease-in-out both;
   }
 }
 

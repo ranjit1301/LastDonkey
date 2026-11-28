@@ -29,14 +29,14 @@ const SIZE_CLASSES: Record<
     wrapper: 'w-11 h-16 rounded-md',
     rank: 'text-[11px] leading-none font-bold',
     cornerSuit: 'text-[10px] leading-none',
-    centerSuit: 'text-lg leading-none',
+    centerSuit: 'text-base leading-none',
     padding: 'p-1',
   },
   sm: {
     wrapper: 'w-14 h-20 sm:w-16 sm:h-24 rounded-lg',
     rank: 'text-xs sm:text-sm leading-none font-bold',
     cornerSuit: 'text-[11px] sm:text-xs leading-none',
-    centerSuit: 'text-2xl sm:text-3xl leading-none',
+    centerSuit: 'text-xl sm:text-2xl leading-none',
     padding: 'p-1.5',
   },
   compact: {
@@ -115,7 +115,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
       aria-label={`${rankLabel} of ${SUIT_NAMES[card.suit]}${selected ? ', selected' : ''}${playable ? ', playable' : onClick ? ', not playable' : ''}`}
       aria-pressed={onClick ? selected : undefined}
       className={[
-        'relative select-none card-ivory border flex flex-col justify-between transition-[transform,opacity,filter,box-shadow,border-color] duration-150 ease-out will-change-transform',
+        'relative overflow-hidden select-none card-ivory border flex flex-col justify-between transition-[transform,opacity,filter,box-shadow,border-color] duration-150 ease-out will-change-transform',
         borderClass,
         cfg.wrapper,
         cfg.padding,
@@ -135,32 +135,36 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
       />
 
       {/* Top-left rank & suit index */}
-      <div className="relative z-10 flex flex-col items-center self-start">
+      <div className="relative z-10 flex flex-col items-center self-start leading-none">
         <span className={`${cfg.rank} tracking-tight font-sans`}>{rankLabel}</span>
         <span className={`${cfg.cornerSuit} mt-0.5`}>{suitSymbol}</span>
       </div>
 
-      {/* Center face artwork */}
-      <div className="relative z-10 flex-1 flex items-center justify-center pointer-events-none">
+      {/* Center face artwork — absolutely centered so corner indices never shift or overflow */}
+      <div className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center">
         {isAceOfSpades ? (
           <div className="relative flex items-center justify-center">
             <span className={`${cfg.centerSuit} drop-shadow-[0_1px_1px_rgba(0,0,0,0.18)]`}>♠</span>
-            <span
-              className="absolute text-[9px] sm:text-[10px] font-display font-bold text-[#D4A843] translate-y-[1px]"
-              aria-hidden="true"
-            >
-              LD
-            </span>
+            {size !== 'xs' && (
+              <span
+                className="absolute text-[8px] sm:text-[10px] font-display font-bold text-[#D4A843] translate-y-[1px]"
+                aria-hidden="true"
+              >
+                LD
+              </span>
+            )}
           </div>
-        ) : isCourt ? (
+        ) : isCourt && size !== 'xs' ? (
           <div className="flex flex-col items-center justify-center">
             <span
-              className="text-[9px] sm:text-[10px] font-display font-bold tracking-wider uppercase opacity-70"
+              className={`${
+                size === 'sm' ? 'text-[7px] sm:text-[9px]' : 'text-[9px] sm:text-[10px]'
+              } font-display font-bold tracking-wider uppercase opacity-70 leading-none`}
               aria-hidden="true"
             >
               {card.rank === 13 ? 'King' : card.rank === 12 ? 'Queen' : 'Jack'}
             </span>
-            <span className={`${cfg.centerSuit} -mt-0.5`}>{suitSymbol}</span>
+            <span className={`${cfg.centerSuit} mt-0.5`}>{suitSymbol}</span>
           </div>
         ) : (
           <span className={cfg.centerSuit}>{suitSymbol}</span>
@@ -168,7 +172,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
       </div>
 
       {/* Bottom-right mirrored index */}
-      <div className="relative z-10 flex flex-col items-center self-end rotate-180">
+      <div className="relative z-10 flex flex-col items-center self-end rotate-180 leading-none">
         <span className={`${cfg.rank} tracking-tight font-sans`}>{rankLabel}</span>
         <span className={`${cfg.cornerSuit} mt-0.5`}>{suitSymbol}</span>
       </div>
