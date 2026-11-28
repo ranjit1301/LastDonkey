@@ -104,20 +104,25 @@ export function createInitialGameState(
     hands = dealCards(deck, playerConfigs.length);
   }
 
-  const players: Player[] = playerConfigs.map((cfg, index) => ({
-    id: cfg.id,
-    name: cfg.name.trim() || `Player ${index + 1}`,
-    type: cfg.type,
-    seatIndex: index,
-    hand: hands[index],
-    finished: hands[index].length === 0,
-    finishOrder: null,
-    removed: false,
-    connected: true,
-    consecutiveMissedTurns: 0,
-    avatarColor: cfg.avatarColor ?? DEFAULT_AVATAR_COLORS[index % DEFAULT_AVATAR_COLORS.length],
-    ...(cfg.botAvatarId ? { botAvatarId: cfg.botAvatarId } : {}),
-  }));
+  const players: Player[] = playerConfigs.map((cfg, index) => {
+    const resolvedAvatarId = cfg.avatarId ?? cfg.botAvatarId;
+    return {
+      id: cfg.id,
+      name: cfg.name.trim() || `Player ${index + 1}`,
+      type: cfg.type,
+      seatIndex: index,
+      hand: hands[index],
+      finished: hands[index].length === 0,
+      finishOrder: null,
+      removed: false,
+      connected: true,
+      consecutiveMissedTurns: 0,
+      avatarColor: cfg.avatarColor ?? DEFAULT_AVATAR_COLORS[index % DEFAULT_AVATAR_COLORS.length],
+      ...(resolvedAvatarId
+        ? { avatarId: resolvedAvatarId, botAvatarId: resolvedAvatarId }
+        : {}),
+    };
+  });
 
   // Section 5: The player holding A♠ starts the game and must play A♠ first.
   const starter = players.find((p) => p.hand.some((c) => c.id === ACE_OF_SPADES_ID));
@@ -621,6 +626,73 @@ export function removePlayerAndRedistribute(
   const target = state.players.find((p) => p.id === playerId);
   if (!target || !isPlayerActive(target)) {
     return { ok: false, error: 'Player is not active in this game.' };
+  }
+
+  // 2-player match rule: when one player exits or is removed, no cards are redistributed;
+  // the exiting/removed player loses and the remaining active player immediately wins.
+  // 3+ player games continue using the existing redistribution & Last Donkey rules below.
+  if (state.players.length === 2) {
+    const winner = state.players.find((p) => p.id !== playerId && isPlayerActive(p)) ?? null;
+    const leftoverOnTable =
+      state.phase === 'playing' ? state.currentTrick.plays.map((tp) => tp.card) : [];
+
+    const updatedTwoPlayerList: Player[] = state.players.map((p) => {
+      if (p.id === playerId) {
+        return {
+          ...p,
+          hand: [],
+          removed: true,
+          connected: false,
+          finished: false,
+          finishOrder: null,
+        };
+      }
+      if (winner && p.id === winner.id) {
+        return {
+          ...p,
+          hand: [...p.hand],
+          finished: true,
+          finishOrder: 1,
+        };
+      }
+      return { ...p, hand: [...p.hand] };
+    });
+
+    const redistribution: RedistributionEvent = {
+      removedPlayerId: playerId,
+      removedPlayerName: target.name,
+      reason,
+      cardsDistributedCount: 0,
+      recipientCounts: {},
+      afterTrickCount: state.trickHistory.length,
+    };
+    const nextRedistributionHistory: RedistributionEvent[] = [
+      ...(state.redistributionHistory ?? []),
+      redistribution,
+    ];
+
+    const endReason = winner
+      ? reason === 'missed_turns'
+        ? `${target.name} was removed after 3 consecutive missed turns and loses. ${winner.name} wins!`
+        : `${target.name} exited the game and loses. ${winner.name} wins!`
+      : 'No active players remain.';
+
+    return {
+      ok: true,
+      state: {
+        ...state,
+        phase: 'finished',
+        players: updatedTwoPlayerList,
+        currentTurnPlayerId: null,
+        finishOrder: winner ? [winner.id] : state.finishOrder,
+        finishGroups: winner ? [[winner.id]] : state.finishGroups,
+        removedCards: [...state.removedCards, ...leftoverOnTable],
+        donkeyPlayerId: target.id,
+        endReason,
+        lastRedistribution: redistribution,
+        redistributionHistory: nextRedistributionHistory,
+      },
+    };
   }
 
   // Identify remaining active recipients in clockwise order starting strictly AFTER target

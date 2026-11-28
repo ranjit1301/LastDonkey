@@ -250,6 +250,8 @@ export function createMultiplayerRuntime(
               visibility: msg.visibility === 'public' ? 'public' : 'private',
               turnTimerSeconds: msg.turnTimerSeconds,
               difficulty: msg.difficulty,
+              avatarId: msg.avatarId ? String(msg.avatarId) : undefined,
+              savedAvatarId: msg.savedAvatarId ? String(msg.savedAvatarId) : undefined,
             });
             if (!res.ok) return fail(res.error);
 
@@ -280,6 +282,8 @@ export function createMultiplayerRuntime(
               roomCode: String(msg.roomCode ?? ''),
               playerName: String(msg.playerName ?? ''),
               inviteToken: msg.inviteToken ? String(msg.inviteToken) : undefined,
+              avatarId: msg.avatarId ? String(msg.avatarId) : undefined,
+              savedAvatarId: msg.savedAvatarId ? String(msg.savedAvatarId) : undefined,
             });
             if (!res.ok) return fail(res.error);
 
@@ -408,6 +412,17 @@ export function createMultiplayerRuntime(
               meta.roomCode,
               meta.playerId,
               String(msg.targetPlayerId ?? '')
+            );
+            if (!res.ok) return fail(res.error);
+            break;
+          }
+
+          case 'update_avatar': {
+            if (!meta.roomCode || !meta.playerId) return fail('Not in a room.');
+            const res = roomManager.updateSeatAvatar(
+              meta.roomCode,
+              meta.playerId,
+              String(msg.avatarId ?? '')
             );
             if (!res.ok) return fail(res.error);
             break;

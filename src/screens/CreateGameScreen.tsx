@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Bot, Globe, Lock, Users } from 'lucide-react';
 import { getDealingCounts, type DifficultyMode } from '../engine';
+import { AvatarPicker } from '../components/AvatarPicker';
+import { PlayerAvatar } from '../components/BotAvatar';
 import { DifficultySelector } from '../components/DifficultySelector';
+import { getBotAvatarById } from '../lib/botAvatars';
 import {
   buildDefaultPlayers,
   generateRoomCode,
@@ -16,9 +19,11 @@ export type CreateRoomMode = 'online' | 'practice' | 'pass-and-play';
 interface CreateGameScreenProps {
   initialMode: CreateRoomMode;
   initialPlayerName: string;
+  initialAvatarId: string;
   defaultTurnTimer: TurnTimerSeconds;
   defaultDifficulty: DifficultyMode;
   onBack: () => void;
+  onSaveAvatarId: (avatarId: string) => void;
   onCreateOnlineRoom: (params: {
     playerName: string;
     tableName: string;
@@ -26,6 +31,7 @@ interface CreateGameScreenProps {
     visibility: RoomVisibility;
     turnTimerSeconds: TurnTimerSeconds;
     difficulty: DifficultyMode;
+    avatarId?: string;
   }) => void;
   onCreateLocalLobby: (config: LocalLobbyConfig) => void;
 }
@@ -35,26 +41,37 @@ const PLAYER_COUNTS = [2, 3, 4, 5, 6] as const;
 export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
   initialMode,
   initialPlayerName,
+  initialAvatarId,
   defaultTurnTimer,
   defaultDifficulty,
   onBack,
+  onSaveAvatarId,
   onCreateOnlineRoom,
   onCreateLocalLobby,
 }) => {
   const [createMode, setCreateMode] = useState<CreateRoomMode>(initialMode);
   const [hostName, setHostName] = useState(initialPlayerName || 'Player');
+  const [selectedAvatarId, setSelectedAvatarId] = useState(initialAvatarId);
+  const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
   const [tableName, setTableName] = useState('');
   const [capacity, setCapacity] = useState<number>(4);
   const [visibility, setVisibility] = useState<RoomVisibility>('private');
   const [turnTimerSeconds, setTurnTimerSeconds] = useState<TurnTimerSeconds>(defaultTurnTimer);
   const [difficulty, setDifficulty] = useState<DifficultyMode>(defaultDifficulty);
 
+  const selectedAvatarProfile = getBotAvatarById(selectedAvatarId);
   const dealingCounts = getDealingCounts(capacity);
+
+  const handleSelectAvatar = (nextAvatarId: string) => {
+    setSelectedAvatarId(nextAvatarId);
+    onSaveAvatarId(nextAvatarId);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = hostName.trim() || 'Player';
     const cleanTable = tableName.trim() || `${cleanName}’s Table`;
+    const chosenAvatarId = selectedAvatarProfile?.id;
 
     if (createMode === 'online') {
       onCreateOnlineRoom({
@@ -64,6 +81,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
         visibility,
         turnTimerSeconds,
         difficulty,
+        avatarId: chosenAvatarId,
       });
       return;
     }
@@ -77,7 +95,7 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
         visibility: 'private',
         capacity,
         difficulty,
-        players: buildDefaultPlayers(capacity, cleanName, localMode),
+        players: buildDefaultPlayers(capacity, cleanName, localMode, Math.random, chosenAvatarId),
       })
     );
   };
@@ -143,42 +161,95 @@ export const CreateGameScreen: React.FC<CreateGameScreenProps> = ({
             })}
           </div>
 
-          {/* Name Inputs */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="create-host-name"
-                className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
-              >
-                Your Name
-              </label>
-              <input
-                id="create-host-name"
-                type="text"
-                maxLength={20}
-                value={hostName}
-                onChange={(e) => setHostName(e.target.value)}
-                placeholder="Your nickname"
-                className="w-full min-h-[48px] px-4 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-[#261E18] font-medium focus:outline-none focus:border-[#D95732]"
-              />
+          {/* Name Inputs + Character Avatar */}
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label
+                  htmlFor="create-host-name"
+                  className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
+                >
+                  Your Name
+                </label>
+                <input
+                  id="create-host-name"
+                  type="text"
+                  maxLength={20}
+                  value={hostName}
+                  onChange={(e) => setHostName(e.target.value)}
+                  placeholder="Your nickname"
+                  className="w-full min-h-[48px] px-4 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-[#261E18] font-medium focus:outline-none focus:border-[#D95732]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="create-table-name"
+                  className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
+                >
+                  Room Name (optional)
+                </label>
+                <input
+                  id="create-table-name"
+                  type="text"
+                  maxLength={28}
+                  value={tableName}
+                  onChange={(e) => setTableName(e.target.value)}
+                  placeholder="Evening Rang Vapas"
+                  className="w-full min-h-[48px] px-4 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-[#261E18] font-medium focus:outline-none focus:border-[#D95732]"
+                />
+              </div>
             </div>
 
-            <div>
-              <label
-                htmlFor="create-table-name"
-                className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
-              >
-                Room Name (optional)
-              </label>
-              <input
-                id="create-table-name"
-                type="text"
-                maxLength={28}
-                value={tableName}
-                onChange={(e) => setTableName(e.target.value)}
-                placeholder="Evening Rang Vapas"
-                className="w-full min-h-[48px] px-4 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-[#261E18] font-medium focus:outline-none focus:border-[#D95732]"
-              />
+            <div className="rounded-2xl bg-[#EFE6D8] border border-[#DFD3C1] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {selectedAvatarProfile ? (
+                    <PlayerAvatar
+                      name={selectedAvatarProfile.name}
+                      type="human"
+                      avatarColor={selectedAvatarProfile.accentColor}
+                      avatarId={selectedAvatarProfile.id}
+                      size="sm"
+                      animated={false}
+                    />
+                  ) : (
+                    <span className="w-9 h-9 rounded-full bg-[#365B40] text-[#FAF5ED] flex items-center justify-center text-xs font-bold shrink-0">
+                      Auto
+                    </span>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-[#261E18] truncate">
+                      {selectedAvatarProfile ? selectedAvatarProfile.name : 'Auto-Assigned Character'}
+                    </div>
+                    <div className="text-[11px] text-[#6E6052] truncate">
+                      {selectedAvatarProfile
+                        ? selectedAvatarProfile.personality
+                        : 'An unused character will be assigned automatically'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAvatarPickerOpen((prev) => !prev)}
+                  className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#FAF5ED] border border-[#D8CBB8] text-xs font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer shrink-0"
+                >
+                  {avatarPickerOpen ? 'Done' : 'Change Avatar'}
+                </button>
+              </div>
+              {avatarPickerOpen && (
+                <div className="mt-3 pt-3 border-t border-[#DFD3C1]">
+                  <AvatarPicker
+                    selectedAvatarId={selectedAvatarId}
+                    onSelect={(id) => {
+                      handleSelectAvatar(id);
+                      if (id) setAvatarPickerOpen(false);
+                    }}
+                    allowAuto
+                    compact
+                  />
+                </div>
+              )}
             </div>
           </div>
 

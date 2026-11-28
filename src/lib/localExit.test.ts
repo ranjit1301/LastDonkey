@@ -441,4 +441,42 @@ describe('Phase 2 Batch 2 — Pass-and-Play Voluntary Exit & Handoff', () => {
     assert.equal(exitRes.cardsDistributedCount, 2);
     assert.match(exitRes.toast?.message ?? '', /2 cards redistributed/i);
   });
+
+  it('in a 2-player Pass-and-Play match, exiting between tricks awards victory to the remaining player with zero card redistribution', () => {
+    const initial = createInitialGameState(makeHumanPlayers(2), {
+      customHands: [
+        [makeCard('spades', 14), makeCard('hearts', 5), makeCard('clubs', 7)],
+        [makeCard('spades', 10), makeCard('diamonds', 8), makeCard('clubs', 4)],
+      ],
+    });
+
+    // Mid-trick exit remains blocked
+    const mid = (playCard(initial, 'p1', 'spades-14') as { ok: true; state: GameState }).state;
+    const midRes = executeLocalVoluntaryExit(mid, 'p1', { isPassAndPlay: true });
+    assert.equal(midRes.ok, false);
+
+    // Finish trick 1 -> between tricks
+    let between = (playCard(mid, 'p2', 'spades-10') as { ok: true; state: GameState }).state;
+    between = continueAfterTrick(between);
+
+    const exitRes = executeLocalVoluntaryExit(between, 'p1', {
+      isPassAndPlay: true,
+      rng: createSeededRng(21),
+    });
+
+    assert.equal(exitRes.ok, true);
+    if (!exitRes.ok || !exitRes.nextState) return;
+
+    assert.equal(exitRes.shouldLeaveToLobby, false);
+    assert.equal(exitRes.cardsDistributedCount, 0);
+    assert.equal(exitRes.nextState.phase, 'finished');
+    assert.equal(exitRes.nextState.donkeyPlayerId, 'p1');
+    assert.equal(exitRes.nextState.players[0].removed, true);
+    assert.equal(exitRes.nextState.players[1].finished, true);
+    assert.equal(exitRes.nextState.players[1].finishOrder, 1);
+    assert.equal(exitRes.nextState.players[1].hand.length, 2);
+    assert.match(exitRes.toast?.message ?? '', /Player 2 wins/i);
+    assert.doesNotMatch(exitRes.toast?.message ?? '', /redistributed/i);
+  });
 });
+

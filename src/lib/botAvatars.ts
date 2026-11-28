@@ -162,21 +162,30 @@ export function isBotAvatarName(name?: string | null): boolean {
   return getBotAvatarByName(name) !== null;
 }
 
+export function isValidCharacterAvatarId(id?: string | null): boolean {
+  return getBotAvatarById(id) !== null;
+}
+
 /**
- * Resolves the caricature avatar profile for a bot player/seat.
- * Returns null for human players so human avatars remain untouched.
+ * Resolves the character avatar profile for any player or seat (both human and bot):
+ * - Explicit `avatarId` / `botAvatarId` works for BOTH human and bot players.
+ * - Name-based and deterministic hash fallbacks apply strictly to bots so a human
+ *   without an assigned character never accidentally matches a bot by display name.
  */
-export function resolveBotAvatar(player: {
+export function resolveCharacterAvatar(player: {
   type?: 'human' | 'bot';
+  avatarId?: string | null;
   botAvatarId?: string | null;
   name?: string | null;
   id?: string | null;
 }): BotAvatarProfile | null {
-  if (player.type && player.type !== 'bot') {
+  const explicitId = player.avatarId ?? player.botAvatarId;
+  const byId = getBotAvatarById(explicitId);
+  if (byId) return byId;
+
+  if (player.type === 'human') {
     return null;
   }
-  const byId = getBotAvatarById(player.botAvatarId);
-  if (byId) return byId;
 
   const byName = getBotAvatarByName(player.name);
   if (byName) return byName;
@@ -190,10 +199,37 @@ export function resolveBotAvatar(player: {
   return BOT_AVATAR_PROFILES[hash % BOT_AVATAR_PROFILES.length];
 }
 
+/**
+ * Backward-compatible alias for resolving character avatars.
+ * Matches explicit avatarId/botAvatarId for both humans and bots; falls back by name/hash only for bots.
+ */
+export function resolveBotAvatar(player: {
+  type?: 'human' | 'bot';
+  avatarId?: string | null;
+  botAvatarId?: string | null;
+  name?: string | null;
+  id?: string | null;
+}): BotAvatarProfile | null {
+  return resolveCharacterAvatar(player);
+}
+
 export interface PickBotAvatarOptions {
   usedAvatarIds?: Iterable<string | null | undefined>;
   usedNames?: Iterable<string | null | undefined>;
   rng?: () => number;
+}
+
+export interface PickCharacterAvatarOptions extends PickBotAvatarOptions {
+  /** Saved avatar ID from a future registered player profile (highest precedence when valid & unused) */
+  savedAvatarId?: string | null;
+  /** Guest-chosen avatar ID from pre-join selection or localStorage */
+  preferredAvatarId?: string | null;
+}
+
+export interface PickCharacterAvatarResult {
+  profile: BotAvatarProfile;
+  /** True when the player explicitly requested an avatar that was already taken in the room */
+  wasReassigned: boolean;
 }
 
 /**
@@ -234,6 +270,41 @@ export function pickUniqueBotAvatar(options: PickBotAvatarOptions = {}): BotAvat
 
   const fallbackIdx = Math.floor(rng() * BOT_AVATAR_PROFILES.length) % BOT_AVATAR_PROFILES.length;
   return BOT_AVATAR_PROFILES[fallbackIdx];
+}
+
+/**
+ * Resolves a unique character avatar for a human or bot seat:
+ * 1. Honors registered `savedAvatarId` (future account integration) if valid and unused in the room.
+ * 2. Honors guest `preferredAvatarId` if valid and unused in the room.
+ * 3. Otherwise automatically assigns an unused character from the 12-avatar pool.
+ */
+export function pickUniqueCharacterAvatar(
+  options: PickCharacterAvatarOptions = {}
+): PickCharacterAvatarResult {
+  const usedIds = new Set<string>();
+  if (options.usedAvatarIds) {
+    for (const id of options.usedAvatarIds) {
+      if (id) usedIds.add(id);
+    }
+  }
+
+  const requestedProfile =
+    getBotAvatarById(options.savedAvatarId) ?? getBotAvatarById(options.preferredAvatarId);
+
+  if (requestedProfile && !usedIds.has(requestedProfile.id)) {
+    return { profile: requestedProfile, wasReassigned: false };
+  }
+
+  const assigned = pickUniqueBotAvatar({
+    usedAvatarIds: usedIds,
+    usedNames: options.usedNames,
+    rng: options.rng,
+  });
+
+  return {
+    profile: assigned,
+    wasReassigned: Boolean(requestedProfile && requestedProfile.id !== assigned.id),
+  };
 }
 
 /**

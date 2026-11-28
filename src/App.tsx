@@ -84,15 +84,18 @@ export default function App() {
   });
 
   // Local offline Practice / Pass-and-Play state
-  const [localLobby, setLocalLobby] = useState<LocalLobbyConfig>(() => ({
-    roomCode: generateRoomCode(),
-    tableName: 'Practice Table',
-    mode: 'bots',
-    visibility: 'private',
-    capacity: 4,
-    difficulty: loadSettings().defaultDifficulty,
-    players: buildDefaultPlayers(4, 'You', 'bots'),
-  }));
+  const [localLobby, setLocalLobby] = useState<LocalLobbyConfig>(() => {
+    const initial = loadSettings();
+    return {
+      roomCode: generateRoomCode(),
+      tableName: 'Practice Table',
+      mode: 'bots',
+      visibility: 'private',
+      capacity: 4,
+      difficulty: initial.defaultDifficulty,
+      players: buildDefaultPlayers(4, 'You', 'bots', Math.random, initial.selectedAvatarId || undefined),
+    };
+  });
   const [localGame, setLocalGame] = useState<GameState | null>(null);
   const [practiceEndedEarly, setPracticeEndedEarly] = useState(false);
 
@@ -848,44 +851,57 @@ export default function App() {
       return (
         <WelcomeScreen
           initialPlayerName={settings.playerName}
+          initialAvatarId={settings.selectedAvatarId}
           incomingInvite={incomingInvite}
           onClearIncomingInvite={clearInviteParams}
           onSavePlayerName={(playerName) => updateSettings({ ...settings, playerName })}
-          onOpenCreateRoom={(playerName) => {
-            updateSettings({ ...settings, playerName });
+          onSaveAvatarId={(selectedAvatarId) => updateSettings({ ...settings, selectedAvatarId })}
+          onOpenCreateRoom={(playerName, avatarId) => {
+            updateSettings({
+              ...settings,
+              playerName,
+              selectedAvatarId: avatarId ?? settings.selectedAvatarId,
+            });
             setCreateInitialMode('online');
             setScreen('create');
           }}
-          onOpenPractice={(playerName) => {
+          onOpenPractice={(playerName, avatarId) => {
             cancelPendingRestore();
-            updateSettings({ ...settings, playerName });
-            const cfg: LocalLobbyConfig = {
+            const chosenAvatarId = avatarId ?? settings.selectedAvatarId;
+            updateSettings({ ...settings, playerName, selectedAvatarId: chosenAvatarId });
+            const cfg: LocalLobbyConfig = sanitizeLocalLobbyConfig({
               roomCode: generateRoomCode(),
               tableName: 'Practice vs Bots',
               mode: 'bots',
               visibility: 'private',
               capacity: 4,
               difficulty: settings.defaultDifficulty,
-              players: buildDefaultPlayers(4, playerName, 'bots'),
-            };
+              players: buildDefaultPlayers(4, playerName, 'bots', Math.random, chosenAvatarId || undefined),
+            });
             setOnlineRoom(null);
             setLocalLobby(cfg);
             setScreen('lobby');
           }}
-          onOpenPassAndPlay={(playerName) => {
-            updateSettings({ ...settings, playerName });
+          onOpenPassAndPlay={(playerName, avatarId) => {
+            updateSettings({
+              ...settings,
+              playerName,
+              selectedAvatarId: avatarId ?? settings.selectedAvatarId,
+            });
             setCreateInitialMode('pass-and-play');
             setScreen('create');
           }}
-          onJoinOnlineRoom={({ roomCode, playerName, inviteToken }) => {
+          onJoinOnlineRoom={({ roomCode, playerName, inviteToken, avatarId }) => {
             cancelPendingRestore();
-            updateSettings({ ...settings, playerName });
+            const chosenAvatarId = avatarId ?? settings.selectedAvatarId;
+            updateSettings({ ...settings, playerName, selectedAvatarId: chosenAvatarId });
             setLocalGame(null);
             mpClientRef.current?.send({
               type: 'join_room',
               roomCode,
               playerName,
               inviteToken,
+              ...(chosenAvatarId ? { avatarId: chosenAvatarId } : {}),
             });
           }}
           onHowToPlay={() => openRulesFrom('welcome')}
@@ -901,14 +917,18 @@ export default function App() {
         <CreateGameScreen
           initialMode={createInitialMode}
           initialPlayerName={settings.playerName}
+          initialAvatarId={settings.selectedAvatarId}
           defaultTurnTimer={settings.turnTimerSeconds}
           defaultDifficulty={settings.defaultDifficulty}
           onBack={() => setScreen('welcome')}
+          onSaveAvatarId={(selectedAvatarId) => updateSettings({ ...settings, selectedAvatarId })}
           onCreateOnlineRoom={(params) => {
             cancelPendingRestore();
+            const chosenAvatarId = params.avatarId ?? settings.selectedAvatarId;
             updateSettings({
               ...settings,
               playerName: params.playerName,
+              selectedAvatarId: chosenAvatarId,
               defaultDifficulty: params.difficulty,
             });
             setLocalGame(null);
@@ -920,12 +940,18 @@ export default function App() {
               visibility: params.visibility,
               turnTimerSeconds: params.turnTimerSeconds,
               difficulty: params.difficulty,
+              ...(chosenAvatarId ? { avatarId: chosenAvatarId } : {}),
             });
           }}
           onCreateLocalLobby={(cfg) => {
             cancelPendingRestore();
             const safe = sanitizeLocalLobbyConfig(cfg);
-            updateSettings({ ...settings, defaultDifficulty: safe.difficulty });
+            const hostAvatarId = safe.players[0]?.avatarId ?? settings.selectedAvatarId;
+            updateSettings({
+              ...settings,
+              defaultDifficulty: safe.difficulty,
+              selectedAvatarId: hostAvatarId,
+            });
             setOnlineRoom(null);
             setLocalLobby(safe);
             setScreen('lobby');
@@ -939,7 +965,14 @@ export default function App() {
         <GameLobbyScreen
           onlineRoom={onlineRoom}
           localConfig={onlineRoom ? null : localLobby}
-          onUpdateLocalConfig={(next) => setLocalLobby(sanitizeLocalLobbyConfig(next))}
+          onUpdateLocalConfig={(next) => {
+            const safe = sanitizeLocalLobbyConfig(next);
+            setLocalLobby(safe);
+            const hostAvatarId = safe.players[0]?.avatarId;
+            if (hostAvatarId && hostAvatarId !== settings.selectedAvatarId) {
+              updateSettings({ ...settings, selectedAvatarId: hostAvatarId });
+            }
+          }}
           onStartLocalGame={startLocalMatch}
           onLeave={() => {
             if (onlineRoom) {
@@ -952,6 +985,10 @@ export default function App() {
           onOnlineRemoveSeat={(targetPlayerId) =>
             mpClientRef.current?.send({ type: 'remove_seat', targetPlayerId })
           }
+          onOnlineUpdateAvatar={(avatarId) => {
+            updateSettings({ ...settings, selectedAvatarId: avatarId });
+            mpClientRef.current?.send({ type: 'update_avatar', avatarId });
+          }}
           onOnlineStartGame={() => mpClientRef.current?.send({ type: 'start_game' })}
           onOnlineCancelRoom={() => mpClientRef.current?.send({ type: 'cancel_room' })}
           onOnlineRevokeInvite={() => mpClientRef.current?.send({ type: 'revoke_invite' })}

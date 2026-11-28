@@ -2823,3 +2823,200 @@ describe('Final Release Readiness Audit — Security, Socket Lifecycle & Full Ma
   });
 });
 
+describe('2-Player Online Exit / Removal & Guest Character Avatars', () => {
+  it('in a 2-player online match, voluntary exit makes the exiting player lose and the remaining player win with zero card redistribution', () => {
+    const { manager, notifications } = createTestManager({ botDelayMs: 5000 });
+    try {
+      const host = manager.createRoom({
+        playerName: 'Alice',
+        capacity: 2,
+        visibility: 'private',
+        turnTimerSeconds: 0,
+        avatarId: 'surili',
+      });
+      assert.equal(host.ok, true);
+      if (!host.ok) return;
+
+      const guest = manager.joinRoom({
+        roomCode: host.room.roomCode,
+        playerName: 'Bob',
+        avatarId: 'babloo-uncle',
+      });
+      assert.equal(guest.ok, true);
+      if (!guest.ok) return;
+
+      assert.equal(manager.startGame(host.room.roomCode, host.playerId).ok, true);
+      const room = manager.getRoom(host.room.roomCode)!;
+      const bobCardsBefore = room.gameState!.players.find((p) => p.id === guest.playerId)!.hand.length;
+
+      // Between tricks (start of trick 1, 0 plays on table) -> Alice exits voluntarily
+      const exitRes = manager.voluntaryExitInGame(room.roomCode, host.playerId);
+      assert.equal(exitRes.ok, true);
+
+      assert.equal(room.status, 'finished');
+      assert.equal(room.gameState?.phase, 'finished');
+      assert.equal(room.gameState?.donkeyPlayerId, host.playerId);
+      assert.deepEqual(room.gameState?.finishOrder, [guest.playerId]);
+
+      const bobView = manager.buildClientView(room, guest.playerId);
+      const aliceState = bobView.gameState!.players.find((p) => p.id === host.playerId)!;
+      const bobState = bobView.gameState!.players.find((p) => p.id === guest.playerId)!;
+      assert.equal(aliceState.removed, true);
+      assert.equal(aliceState.finished, false);
+      assert.equal(bobState.finished, true);
+      assert.equal(bobState.finishOrder, 1);
+      assert.equal(bobState.cardCount, bobCardsBefore);
+      assert.equal(bobView.gameState?.lastRedistribution?.cardsDistributedCount, 0);
+      assert.ok(
+        notifications.some((n) => /Alice exited the game and loses\. Bob wins!/i.test(n.message))
+      );
+      assert.equal(
+        notifications.some((n) => /redistributed clockwise/i.test(n.message)),
+        false
+      );
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  it('in a 2-player online match, removal after 3 missed turns awards the win to the remaining player', () => {
+    const { manager, notifications } = createTestManager();
+    try {
+      const host = manager.createRoom({
+        playerName: 'Alice',
+        capacity: 2,
+        visibility: 'private',
+        turnTimerSeconds: 10,
+      });
+      assert.equal(host.ok, true);
+      if (!host.ok) return;
+
+      const guest = manager.joinRoom({
+        roomCode: host.room.roomCode,
+        playerName: 'Bob',
+      });
+      assert.equal(guest.ok, true);
+      if (!guest.ok) return;
+
+      assert.equal(manager.startGame(host.room.roomCode, host.playerId).ok, true);
+      const room = manager.getRoom(host.room.roomCode)!;
+      const leaderId = room.gameState!.currentTurnPlayerId!;
+      const otherId = leaderId === host.playerId ? guest.playerId : host.playerId;
+
+      // Simulate leader already having 2 consecutive missed turns, then timing out on the 3rd
+      const leaderPlayer = room.gameState!.players.find((p) => p.id === leaderId)!;
+      leaderPlayer.consecutiveMissedTurns = 2;
+      const otherCardsBefore = room.gameState!.players.find((p) => p.id === otherId)!.hand.length;
+
+      manager.executeMissedTurnTimeout(room, leaderId);
+
+      assert.equal(room.status, 'finished');
+      assert.equal(room.gameState?.phase, 'finished');
+      assert.equal(room.gameState?.donkeyPlayerId, leaderId);
+      assert.deepEqual(room.gameState?.finishOrder, [otherId]);
+      assert.equal(room.gameState?.players.find((p) => p.id === otherId)?.hand.length, otherCardsBefore);
+      assert.equal(
+        notifications.some((n) => /redistributed clockwise/i.test(n.message)),
+        false
+      );
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  it('assigns unique character avatars to hosts, guests, and bots, handles collisions, supports waiting-lobby updates, and preserves avatars across reconnect', () => {
+    const { manager, notifications } = createTestManager();
+    try {
+      const host = manager.createRoom({
+        playerName: 'HostOne',
+        capacity: 4,
+        visibility: 'private',
+        avatarId: 'babloo-uncle',
+      });
+      assert.equal(host.ok, true);
+      if (!host.ok) return;
+      assert.equal(host.room.seats[0].avatarId, 'babloo-uncle');
+      assert.equal(host.room.seats[0].botAvatarId, 'babloo-uncle');
+
+      // Guest requests the exact same avatar -> auto-assigned an unused character + targeted notice
+      const guestCollision = manager.joinRoom({
+        roomCode: host.room.roomCode,
+        playerName: 'GuestTwo',
+        avatarId: 'babloo-uncle',
+      });
+      assert.equal(guestCollision.ok, true);
+      if (!guestCollision.ok) return;
+      const guest2Seat = host.room.seats.find((s) => s.playerId === guestCollision.playerId)!;
+      assert.ok(guest2Seat.avatarId);
+      assert.notEqual(guest2Seat.avatarId, 'babloo-uncle');
+      assert.ok(
+        notifications.some(
+          (n) =>
+            n.targetPlayerId === guestCollision.playerId && /already taken/i.test(n.message)
+        )
+      );
+
+      // Guest with registered savedAvatarId takes precedence over guest avatarId
+      const guestSaved = manager.joinRoom({
+        roomCode: host.room.roomCode,
+        playerName: 'GuestThree',
+        avatarId: 'gappu',
+        savedAvatarId: 'wifi-baba',
+      });
+      assert.equal(guestSaved.ok, true);
+      if (!guestSaved.ok) return;
+      const guest3Seat = host.room.seats.find((s) => s.playerId === guestSaved.playerId)!;
+      assert.equal(guest3Seat.avatarId, 'wifi-baba');
+
+      // Add bot -> must not duplicate any human seat's character avatar
+      assert.equal(manager.addBot(host.room.roomCode, host.playerId).ok, true);
+      const allSeatAvatars = host.room.seats.map((s) => s.avatarId);
+      assert.equal(new Set(allSeatAvatars).size, 4);
+
+      // Waiting-lobby avatar update rejects taken avatar and succeeds on unused avatar
+      const rejectTaken = manager.updateSeatAvatar(
+        host.room.roomCode,
+        guestCollision.playerId,
+        'babloo-uncle'
+      );
+      assert.equal(rejectTaken.ok, false);
+
+      const unusedCandidate = ['surili', 'chotu-chaiwala', 'rocky-raja', 'hasmukh-didi'].find(
+        (id) => !allSeatAvatars.includes(id)
+      )!;
+      const updateOk = manager.updateSeatAvatar(
+        host.room.roomCode,
+        guestCollision.playerId,
+        unusedCandidate
+      );
+      assert.equal(updateOk.ok, true);
+      assert.equal(guest2Seat.avatarId, unusedCandidate);
+
+      // Start game -> update_avatar is rejected mid-game and disconnect/reconnect preserves human avatars
+      assert.equal(manager.startGame(host.room.roomCode, host.playerId).ok, true);
+      assert.equal(
+        manager.updateSeatAvatar(host.room.roomCode, guestCollision.playerId, 'mishra-ji').ok,
+        false
+      );
+
+      manager.handleDisconnect(host.room.roomCode, guestCollision.playerId);
+      const recon = manager.reconnectPlayer(host.room.roomCode, guestCollision.sessionToken);
+      assert.equal(recon.ok, true);
+      const viewAfter = manager.buildClientView(host.room, guestCollision.playerId);
+      const guestPlayerAfter = viewAfter.gameState!.players.find(
+        (p) => p.id === guestCollision.playerId
+      )!;
+      assert.equal(guestPlayerAfter.avatarId, unusedCandidate);
+      assert.equal(guestPlayerAfter.botAvatarId, unusedCandidate);
+      assert.equal(
+        new Set(viewAfter.gameState!.players.map((p) => p.avatarId)).size,
+        4,
+        'All 4 players in active game retain distinct character avatars'
+      );
+    } finally {
+      manager.disposeAll();
+    }
+  });
+});
+
+

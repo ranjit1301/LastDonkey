@@ -11,6 +11,7 @@ export interface RoomSeat {
   type: PlayerType;
   connected: boolean;
   avatarColor: string;
+  avatarId?: string;
   botAvatarId?: string;
   joinedAt: number;
 }
@@ -73,6 +74,7 @@ export interface ClientPlayerView {
   connected: boolean;
   consecutiveMissedTurns: number;
   avatarColor: string;
+  avatarId?: string;
   botAvatarId?: string;
 }
 
@@ -115,12 +117,16 @@ export type ClientMessage =
       visibility: RoomVisibility;
       turnTimerSeconds?: TurnTimerSeconds;
       difficulty?: DifficultyMode;
+      avatarId?: string;
+      savedAvatarId?: string;
     }
   | {
       type: 'join_room';
       roomCode: string;
       playerName: string;
       inviteToken?: string;
+      avatarId?: string;
+      savedAvatarId?: string;
     }
   | {
       type: 'reconnect';
@@ -131,6 +137,7 @@ export type ClientMessage =
   | { type: 'leave_room' }
   | { type: 'add_bot' }
   | { type: 'remove_seat'; targetPlayerId: string }
+  | { type: 'update_avatar'; avatarId: string }
   | { type: 'start_game' }
   | { type: 'cancel_room' }
   | { type: 'play_card'; cardId: string }

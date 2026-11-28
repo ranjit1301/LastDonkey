@@ -88,6 +88,7 @@ interface UnifiedPlayer {
   connected: boolean;
   consecutiveMissedTurns: number;
   avatarColor: string;
+  avatarId?: string;
   botAvatarId?: string;
 }
 
@@ -1036,6 +1037,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                     name={opp.name}
                     type={opp.type}
                     avatarColor={opp.avatarColor}
+                    avatarId={opp.avatarId ?? opp.botAvatarId}
                     botAvatarId={opp.botAvatarId}
                     playerId={opp.id}
                     size={opponents.length >= 4 ? 'sm' : 'md'}
@@ -1385,6 +1387,7 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                         name={perspectivePlayer.name}
                         type={perspectivePlayer.type}
                         avatarColor={perspectivePlayer.avatarColor}
+                        avatarId={perspectivePlayer.avatarId ?? perspectivePlayer.botAvatarId}
                         botAvatarId={perspectivePlayer.botAvatarId}
                         playerId={perspectivePlayer.id}
                         size="sm"

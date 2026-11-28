@@ -18,6 +18,7 @@ const NON_QUEUEABLE_IN_ROOM_ACTIONS: ReadonlySet<ClientMessage['type']> = new Se
   'play_card',
   'add_bot',
   'remove_seat',
+  'update_avatar',
   'start_game',
   'cancel_room',
   'regenerate_code',

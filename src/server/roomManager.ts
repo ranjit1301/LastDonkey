@@ -14,7 +14,11 @@ import {
   type GameState,
   type PlayerConfig,
 } from '../engine/index.ts';
-import { pickUniqueBotAvatar } from '../lib/botAvatars.ts';
+import {
+  getBotAvatarById,
+  pickUniqueBotAvatar,
+  pickUniqueCharacterAvatar,
+} from '../lib/botAvatars.ts';
 import type { TurnTimerSeconds } from '../lib/settings.ts';
 import { cloneTrickOutcome } from '../lib/trickHistory.ts';
 import { derivePlayerExpressionStates } from '../lib/facialExpressions.ts';
@@ -440,7 +444,12 @@ export class RoomManager {
             connected: p.connected,
             consecutiveMissedTurns: p.consecutiveMissedTurns,
             avatarColor: p.avatarColor,
-            ...(p.botAvatarId ? { botAvatarId: p.botAvatarId } : {}),
+            ...((p.avatarId ?? p.botAvatarId)
+              ? {
+                  avatarId: p.avatarId ?? p.botAvatarId,
+                  botAvatarId: p.avatarId ?? p.botAvatarId,
+                }
+              : {}),
           };
         }),
       };
@@ -477,6 +486,8 @@ export class RoomManager {
     visibility: RoomVisibility;
     turnTimerSeconds?: unknown;
     difficulty?: DifficultyMode;
+    avatarId?: string;
+    savedAvatarId?: string;
   }):
     | { ok: true; room: InternalRoom; playerId: string; sessionToken: string }
     | { ok: false; error: string } {
@@ -519,12 +530,21 @@ export class RoomManager {
     const sessionToken = this.generateToken();
     const now = Date.now();
 
+    const { profile: hostAvatar } = pickUniqueCharacterAvatar({
+      savedAvatarId: params.savedAvatarId,
+      preferredAvatarId: params.avatarId,
+      usedAvatarIds: [],
+      rng: this.opts.rng,
+    });
+
     const seat: RoomSeat = {
       playerId,
       name: cleanName,
       type: 'human',
       connected: true,
-      avatarColor: AVATAR_COLORS[0],
+      avatarColor: hostAvatar.accentColor,
+      avatarId: hostAvatar.id,
+      botAvatarId: hostAvatar.id,
       joinedAt: now,
     };
 
@@ -570,6 +590,8 @@ export class RoomManager {
     roomCode: string;
     playerName: string;
     inviteToken?: string;
+    avatarId?: string;
+    savedAvatarId?: string;
   }):
     | { ok: true; room: InternalRoom; playerId: string; sessionToken: string }
     | { ok: false; error: string } {
@@ -600,12 +622,22 @@ export class RoomManager {
     const playerId = `u_${crypto.randomBytes(6).toString('hex')}`;
     const sessionToken = this.generateToken();
 
+    const usedAvatarIds = room.seats.map((s) => s.avatarId ?? s.botAvatarId);
+    const { profile: assignedAvatar, wasReassigned } = pickUniqueCharacterAvatar({
+      savedAvatarId: params.savedAvatarId,
+      preferredAvatarId: params.avatarId,
+      usedAvatarIds,
+      rng: this.opts.rng,
+    });
+
     const seat: RoomSeat = {
       playerId,
       name: cleanName,
       type: 'human',
       connected: true,
-      avatarColor: AVATAR_COLORS[room.seats.length % AVATAR_COLORS.length],
+      avatarColor: assignedAvatar.accentColor,
+      avatarId: assignedAvatar.id,
+      botAvatarId: assignedAvatar.id,
       joinedAt: Date.now(),
     };
 
@@ -620,6 +652,15 @@ export class RoomManager {
       room.vacancyExpiresAt = null;
     }
 
+    if (wasReassigned) {
+      this.emitNote(
+        room,
+        'info',
+        `Your chosen character was already taken in this room — assigned ${assignedAvatar.name}.`,
+        playerId
+      );
+    }
+
     this.emitNote(room, 'info', `${cleanName} joined the room (${room.seats.length}/${room.capacity}).`);
     this.sink.onRoomUpdated(room);
 
@@ -627,6 +668,41 @@ export class RoomManager {
     this.maybeTriggerAiHostAutoStart(room);
 
     return { ok: true, room, playerId, sessionToken };
+  }
+
+  public updateSeatAvatar(
+    roomCode: string,
+    playerId: string,
+    avatarId: string
+  ): { ok: true } | { ok: false; error: string } {
+    const room = this.rooms.get(roomCode);
+    if (!room || room.status !== 'waiting') {
+      return { ok: false, error: 'Avatars can only be changed while waiting in the lobby.' };
+    }
+    const seat = room.seats.find((s) => s.playerId === playerId && s.type === 'human');
+    if (!seat) {
+      return { ok: false, error: 'Player seat not found in this room.' };
+    }
+    const profile = getBotAvatarById(avatarId);
+    if (!profile) {
+      return { ok: false, error: 'Invalid character avatar selected.' };
+    }
+    const takenByOther = room.seats.some(
+      (s) => s.playerId !== playerId && (s.avatarId ?? s.botAvatarId) === profile.id
+    );
+    if (takenByOther) {
+      return {
+        ok: false,
+        error: `${profile.name} is already taken by another player in this room.`,
+      };
+    }
+
+    seat.avatarId = profile.id;
+    seat.botAvatarId = profile.id;
+    seat.avatarColor = profile.accentColor;
+    this.touchRoom(room);
+    this.sink.onRoomUpdated(room);
+    return { ok: true };
   }
 
   /**
@@ -953,8 +1029,8 @@ export class RoomManager {
     }
 
     const usedAvatarIds = room.seats
-      .filter((s) => s.type === 'bot' && s.botAvatarId)
-      .map((s) => s.botAvatarId);
+      .map((s) => s.avatarId ?? s.botAvatarId)
+      .filter((id): id is string => Boolean(id));
     const usedNamesLower = new Set(room.seats.map((s) => s.name.trim().toLowerCase()));
     const pickedAvatar = pickUniqueBotAvatar({
       usedAvatarIds,
@@ -976,6 +1052,7 @@ export class RoomManager {
       type: 'bot',
       connected: true,
       avatarColor: pickedAvatar.accentColor,
+      avatarId: pickedAvatar.id,
       botAvatarId: pickedAvatar.id,
       joinedAt: Date.now(),
     });
@@ -1346,13 +1423,18 @@ export class RoomManager {
       }
     }
 
-    const playerConfigs: PlayerConfig[] = seatsToPlay.map((s) => ({
-      id: s.playerId,
-      name: s.name,
-      type: s.type,
-      avatarColor: s.avatarColor,
-      ...(s.botAvatarId ? { botAvatarId: s.botAvatarId } : {}),
-    }));
+    const playerConfigs: PlayerConfig[] = seatsToPlay.map((s) => {
+      const resolvedAvatarId = s.avatarId ?? s.botAvatarId;
+      return {
+        id: s.playerId,
+        name: s.name,
+        type: s.type,
+        avatarColor: s.avatarColor,
+        ...(resolvedAvatarId
+          ? { avatarId: resolvedAvatarId, botAvatarId: resolvedAvatarId }
+          : {}),
+      };
+    });
 
     room.gameState = createInitialGameState(playerConfigs, {
       rng: this.opts.rng,
@@ -1539,7 +1621,16 @@ export class RoomManager {
     }
 
     const redist = res.state.lastRedistribution;
-    if (redist) {
+    const isTwoPlayerForfeitFinish =
+      res.state.players.length === 2 && res.state.phase === 'finished';
+
+    if (isTwoPlayerForfeitFinish) {
+      this.emitNote(
+        room,
+        'warning',
+        res.state.endReason ?? `${redist?.removedPlayerName ?? 'Player'} exited the game.`
+      );
+    } else if (redist) {
       this.emitNote(
         room,
         'warning',
@@ -1551,9 +1642,11 @@ export class RoomManager {
     return {
       ok: true,
       reason: 'voluntary_exit',
-      message: redist
-        ? `Exited between tricks. ${redist.cardsDistributedCount} cards redistributed clockwise.`
-        : 'Exited game between tricks.',
+      message: isTwoPlayerForfeitFinish
+        ? (res.state.endReason ?? 'Exited game between tricks.')
+        : redist
+          ? `Exited between tricks. ${redist.cardsDistributedCount} cards redistributed clockwise.`
+          : 'Exited game between tricks.',
     };
   }
 
@@ -1700,10 +1793,15 @@ export class RoomManager {
         room.suspendedHostId = null;
         room.aiHostActive = true;
       }
+      const isTwoPlayerForfeitFinish =
+        res.state.players.length === 2 && res.state.phase === 'finished';
       this.emitNote(
         room,
         'error',
-        `${player?.name ?? 'Player'} was removed after 3 consecutive missed turns. Their ${res.redistribution?.cardsDistributedCount ?? 0} cards were redistributed clockwise.`
+        isTwoPlayerForfeitFinish
+          ? (res.state.endReason ??
+              `${player?.name ?? 'Player'} was removed after 3 consecutive missed turns and loses.`)
+          : `${player?.name ?? 'Player'} was removed after 3 consecutive missed turns. Their ${res.redistribution?.cardsDistributedCount ?? 0} cards were redistributed clockwise.`
       );
     }
 

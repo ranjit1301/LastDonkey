@@ -17,7 +17,7 @@ import kalluKakaReliefUrl from '../assets/images/kallu_kaka_relief_sheet_1795817
 import mishraJiReliefUrl from '../assets/images/mishra_ji_relief_sheet_v2_1795817854439.jpg';
 import dhamakaDonReliefUrl from '../assets/images/dhamaka_don_relief_sheet_1795817829226.jpg';
 import hasmukhDidiReliefUrl from '../assets/images/hasmukh_didi_relief_sheet_1795817827967.jpg';
-import { resolveBotAvatar, type BotAvatarProfile } from '../lib/botAvatars';
+import { resolveCharacterAvatar, type BotAvatarProfile } from '../lib/botAvatars';
 import {
   getBotReliefMotionStyle,
   HUMAN_PERSONA_META,
@@ -606,6 +606,9 @@ export interface PlayerAvatarProps {
   name: string;
   type: 'human' | 'bot';
   avatarColor: string;
+  /** Canonical character avatar ID (supported for both human and bot players) */
+  avatarId?: string | null;
+  /** Backward-compatible alias for avatarId */
   botAvatarId?: string | null;
   playerId?: string;
   size?: AvatarSize;
@@ -638,6 +641,7 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   name,
   type,
   avatarColor,
+  avatarId,
   botAvatarId,
   playerId,
   size = 'md',
@@ -655,10 +659,14 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   className = '',
 }) => {
   const dims = SIZE_CLASSES[size];
-  const botProfile: BotAvatarProfile | null =
-    type === 'bot'
-      ? resolveBotAvatar({ type, botAvatarId, name, id: playerId })
-      : null;
+  const effectiveAvatarId = avatarId ?? botAvatarId;
+  const botProfile: BotAvatarProfile | null = resolveCharacterAvatar({
+    type,
+    avatarId: effectiveAvatarId,
+    botAvatarId: effectiveAvatarId,
+    name,
+    id: playerId,
+  });
 
   const resolvedPersona: HumanAvatarPersona = resolveHumanAvatarPersona({
     preferredPersona: humanPersona,
@@ -752,6 +760,7 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   return (
     <div
       className={`relative inline-flex items-center justify-center shrink-0 select-none ${motionAnimClass} ${className}`}
+      data-avatar-id={botProfile?.id}
       data-bot-avatar-id={botProfile?.id}
       data-avatar-expression={isReliefActive ? `relief-${reliefFrame}` : expression}
       data-relief-frame={isReliefActive ? reliefFrame : 'idle'}

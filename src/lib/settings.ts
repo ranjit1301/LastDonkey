@@ -5,7 +5,7 @@ import {
   getBotAvatarById,
   isBotAvatarName,
   pickUniqueBotAvatar,
-  pickUniqueBotAvatars,
+  pickUniqueCharacterAvatar,
 } from './botAvatars.ts';
 
 export type PlayTapMode = 'confirm' | 'single-tap';
@@ -22,6 +22,8 @@ export interface AppSettings {
   openHandsTesting: boolean;
   turnTimerSeconds: TurnTimerSeconds;
   playerName: string;
+  /** Guest-selected character avatar ID persisted in localStorage (empty string = auto-assign unused) */
+  selectedAvatarId: string;
   defaultDifficulty: DifficultyMode;
 }
 
@@ -35,8 +37,25 @@ export const DEFAULT_SETTINGS: AppSettings = {
   openHandsTesting: false,
   turnTimerSeconds: 15,
   playerName: '',
+  selectedAvatarId: '',
   defaultDifficulty: 'easy',
 };
+
+/**
+ * Resolves the preferred character avatar ID for a player, keeping registered-profile
+ * compatibility ready for future account integration:
+ * registered savedAvatarId takes precedence over guest localStorage selectedAvatarId.
+ */
+export function resolvePreferredAvatarId(options: {
+  savedAvatarId?: string | null;
+  selectedAvatarId?: string | null;
+}): string | undefined {
+  const saved = getBotAvatarById(options.savedAvatarId);
+  if (saved) return saved.id;
+  const guest = getBotAvatarById(options.selectedAvatarId);
+  if (guest) return guest.id;
+  return undefined;
+}
 
 const STORAGE_KEY = 'last_donkey_settings_v2';
 
@@ -45,9 +64,11 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    const validAvatarId = getBotAvatarById(parsed.selectedAvatarId)?.id ?? '';
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      selectedAvatarId: validAvatarId,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -112,42 +133,66 @@ export function buildDefaultPlayers(
   count: number,
   hostName: string,
   mode: LocalMode,
-  rng: () => number = Math.random
+  rng: () => number = Math.random,
+  hostPreferredAvatarId?: string | null
 ): PlayerConfig[] {
   const safeHost = hostName.trim() || 'You';
   const clampedCount = Math.max(2, Math.min(6, count));
-  const botProfiles =
-    mode === 'bots'
-      ? pickUniqueBotAvatars(clampedCount - 1, { usedNames: [safeHost], rng })
-      : [];
+  const usedAvatarIds = new Set<string>();
+  const usedNames = new Set<string>([safeHost.toLowerCase()]);
 
-  return Array.from({ length: clampedCount }, (_, idx) => {
-    if (idx === 0) {
-      return {
-        id: 'p1',
-        name: safeHost,
-        type: 'human',
-        avatarColor: AVATAR_COLORS[0],
-      };
-    }
+  const hostPicked = pickUniqueCharacterAvatar({
+    preferredAvatarId: hostPreferredAvatarId,
+    usedAvatarIds,
+    rng,
+  }).profile;
+  usedAvatarIds.add(hostPicked.id);
+
+  const players: PlayerConfig[] = [
+    {
+      id: 'p1',
+      name: safeHost,
+      type: 'human',
+      avatarColor: hostPicked.accentColor,
+      avatarId: hostPicked.id,
+      botAvatarId: hostPicked.id,
+    },
+  ];
+
+  for (let idx = 1; idx < clampedCount; idx++) {
     const isHuman = mode === 'pass-and-play';
+    const picked = pickUniqueBotAvatar({
+      usedAvatarIds,
+      usedNames: isHuman ? undefined : usedNames,
+      rng,
+    });
+    usedAvatarIds.add(picked.id);
+
     if (isHuman) {
-      return {
+      const humanName = `Player ${idx + 1}`;
+      usedNames.add(humanName.toLowerCase());
+      players.push({
         id: `p${idx + 1}`,
-        name: `Player ${idx + 1}`,
+        name: humanName,
         type: 'human',
-        avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
-      };
+        avatarColor: picked.accentColor,
+        avatarId: picked.id,
+        botAvatarId: picked.id,
+      });
+    } else {
+      usedNames.add(picked.name.toLowerCase());
+      players.push({
+        id: `p${idx + 1}`,
+        name: picked.name,
+        type: 'bot',
+        avatarColor: picked.accentColor,
+        avatarId: picked.id,
+        botAvatarId: picked.id,
+      });
     }
-    const profile = botProfiles[idx - 1];
-    return {
-      id: `p${idx + 1}`,
-      name: profile.name,
-      type: 'bot',
-      avatarColor: profile.accentColor,
-      botAvatarId: profile.id,
-    };
-  });
+  }
+
+  return players;
 }
 
 export const MIN_LOCAL_PLAYERS = 2;
@@ -183,7 +228,7 @@ export function sanitizeLocalLobbyConfig(config: LocalLobbyConfig): LocalLobbyCo
     players = buildDefaultPlayers(MIN_LOCAL_PLAYERS, 'You', 'bots');
   } else if (players.length < MIN_LOCAL_PLAYERS) {
     const picked = pickUniqueBotAvatar({
-      usedAvatarIds: players.map((p) => p.botAvatarId),
+      usedAvatarIds: players.map((p) => p.avatarId ?? p.botAvatarId),
       usedNames: players.map((p) => p.name),
     });
     const fallbackBot: PlayerConfig = {
@@ -191,37 +236,36 @@ export function sanitizeLocalLobbyConfig(config: LocalLobbyConfig): LocalLobbyCo
       name: picked.name,
       type: 'bot',
       avatarColor: picked.accentColor,
+      avatarId: picked.id,
       botAvatarId: picked.id,
     };
     players = [...players, fallbackBot];
   }
 
-  // Ensure every bot seat has a valid unique botAvatarId and human seats do not carry botAvatarId
-  const seenBotAvatarIds = new Set<string>();
+  // Ensure every seat (human AND bot) has a valid unique character avatar from the 12-avatar pool
+  const seenAvatarIds = new Set<string>();
   const allNames = new Set(players.map((p) => p.name.trim().toLowerCase()));
-  players = players.map((p, idx) => {
-    if (p.type !== 'bot') {
-      if (!p.botAvatarId) return p;
-      const { botAvatarId: _removed, ...rest } = p;
+  players = players.map((p) => {
+    const existingProfile = getBotAvatarById(p.avatarId ?? p.botAvatarId);
+    if (existingProfile && !seenAvatarIds.has(existingProfile.id)) {
+      seenAvatarIds.add(existingProfile.id);
       return {
-        ...rest,
-        avatarColor: p.avatarColor ?? AVATAR_COLORS[idx % AVATAR_COLORS.length],
+        ...p,
+        avatarId: existingProfile.id,
+        botAvatarId: existingProfile.id,
+        avatarColor: p.avatarColor ?? existingProfile.accentColor,
       };
     }
-    const existingProfile = getBotAvatarById(p.botAvatarId);
-    if (existingProfile && !seenBotAvatarIds.has(existingProfile.id)) {
-      seenBotAvatarIds.add(existingProfile.id);
-      return p;
-    }
     const picked = pickUniqueBotAvatar({
-      usedAvatarIds: seenBotAvatarIds,
-      usedNames: allNames,
+      usedAvatarIds: seenAvatarIds,
+      usedNames: p.type === 'bot' ? allNames : undefined,
     });
-    seenBotAvatarIds.add(picked.id);
+    seenAvatarIds.add(picked.id);
     return {
       ...p,
+      avatarId: picked.id,
       botAvatarId: picked.id,
-      avatarColor: p.avatarColor ?? picked.accentColor,
+      avatarColor: picked.accentColor,
     };
   });
 
@@ -247,14 +291,50 @@ export function updateLocalLobbyPlayer(
     return sanitizeLocalLobbyConfig(config);
   }
 
+  const requestedAvatarId = patch.avatarId ?? patch.botAvatarId;
+  const requestedProfile = getBotAvatarById(requestedAvatarId);
+  const currentSeat = config.players[index];
+  const prevSeatAvatarId = currentSeat.avatarId ?? currentSeat.botAvatarId;
+
+  // If explicitly choosing an avatar currently held by another local seat, swap cleanly
+  const swapTargetIndex =
+    requestedProfile && requestedProfile.id !== prevSeatAvatarId
+      ? config.players.findIndex(
+          (p, i) => i !== index && (p.avatarId ?? p.botAvatarId) === requestedProfile.id
+        )
+      : -1;
+
   const nextPlayers = config.players.map((player, idx) => {
+    if (idx === swapTargetIndex && prevSeatAvatarId) {
+      const prevProfile = getBotAvatarById(prevSeatAvatarId);
+      return {
+        ...player,
+        avatarId: prevProfile?.id ?? prevSeatAvatarId,
+        botAvatarId: prevProfile?.id ?? prevSeatAvatarId,
+        avatarColor: prevProfile?.accentColor ?? player.avatarColor,
+        name:
+          player.type === 'bot' && isBotAvatarName(player.name) && prevProfile
+            ? prevProfile.name
+            : player.name,
+      };
+    }
+
     if (idx !== index) return player;
+
     if (idx === 0) {
+      const resolvedId = requestedProfile?.id ?? player.avatarId ?? player.botAvatarId;
+      const resolvedProfile = getBotAvatarById(resolvedId);
       return {
         ...player,
         ...patch,
         type: 'human' as const,
-        botAvatarId: undefined,
+        ...(resolvedProfile
+          ? {
+              avatarId: resolvedProfile.id,
+              botAvatarId: resolvedProfile.id,
+              avatarColor: patch.avatarColor ?? resolvedProfile.accentColor,
+            }
+          : {}),
       };
     }
 
@@ -263,16 +343,19 @@ export function updateLocalLobbyPlayer(
 
     if (switchingToBot) {
       const others = config.players.filter((_, i) => i !== idx);
-      const picked = pickUniqueBotAvatar({
-        usedAvatarIds: others.map((p) => p.botAvatarId),
-        usedNames: others.map((p) => p.name),
-      });
+      const picked =
+        requestedProfile ??
+        pickUniqueBotAvatar({
+          usedAvatarIds: others.map((p) => p.avatarId ?? p.botAvatarId),
+          usedNames: others.map((p) => p.name),
+        });
       const isDefaultHumanName = /^player\s+\d+$/i.test(player.name.trim());
       return {
         ...player,
         ...patch,
         type: 'bot' as const,
-        botAvatarId: patch.botAvatarId ?? picked.id,
+        avatarId: picked.id,
+        botAvatarId: picked.id,
         avatarColor: patch.avatarColor ?? picked.accentColor,
         name:
           patch.name !== undefined
@@ -284,21 +367,44 @@ export function updateLocalLobbyPlayer(
     }
 
     if (switchingToHuman) {
-      const { botAvatarId: _removed, ...rest } = player;
+      const existingProfile =
+        requestedProfile ?? getBotAvatarById(player.avatarId ?? player.botAvatarId);
       const shouldResetBotName = patch.name === undefined && isBotAvatarName(player.name);
       return {
-        ...rest,
+        ...player,
         ...patch,
         type: 'human' as const,
-        botAvatarId: undefined,
-        avatarColor: patch.avatarColor ?? AVATAR_COLORS[idx % AVATAR_COLORS.length],
+        ...(existingProfile
+          ? {
+              avatarId: existingProfile.id,
+              botAvatarId: existingProfile.id,
+              avatarColor: patch.avatarColor ?? existingProfile.accentColor,
+            }
+          : {
+              avatarColor: patch.avatarColor ?? AVATAR_COLORS[idx % AVATAR_COLORS.length],
+            }),
         name: shouldResetBotName ? `Player ${idx + 1}` : (patch.name ?? player.name),
       };
     }
 
+    const nextProfile = requestedProfile ?? getBotAvatarById(player.avatarId ?? player.botAvatarId);
     return {
       ...player,
       ...patch,
+      ...(nextProfile
+        ? {
+            avatarId: nextProfile.id,
+            botAvatarId: nextProfile.id,
+            avatarColor: patch.avatarColor ?? nextProfile.accentColor,
+            name:
+              patch.name === undefined &&
+              player.type === 'bot' &&
+              requestedProfile &&
+              isBotAvatarName(player.name)
+                ? requestedProfile.name
+                : (patch.name ?? player.name),
+          }
+        : {}),
     };
   });
 
@@ -325,6 +431,11 @@ export function addLocalLobbySeat(config: LocalLobbyConfig): LocalLobbyConfig {
     idNum++;
   }
 
+  const picked = pickUniqueBotAvatar({
+    usedAvatarIds: safe.players.map((p) => p.avatarId ?? p.botAvatarId),
+    usedNames: isPass ? undefined : existingNames,
+  });
+
   let nextPlayer: PlayerConfig;
   if (isPass) {
     let n = idx + 1;
@@ -333,18 +444,17 @@ export function addLocalLobbySeat(config: LocalLobbyConfig): LocalLobbyConfig {
       id: `p${idNum}`,
       name: `Player ${n}`,
       type: 'human',
-      avatarColor: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+      avatarColor: picked.accentColor,
+      avatarId: picked.id,
+      botAvatarId: picked.id,
     };
   } else {
-    const picked = pickUniqueBotAvatar({
-      usedAvatarIds: safe.players.map((p) => p.botAvatarId),
-      usedNames: existingNames,
-    });
     nextPlayer = {
       id: `p${idNum}`,
       name: picked.name,
       type: 'bot',
       avatarColor: picked.accentColor,
+      avatarId: picked.id,
       botAvatarId: picked.id,
     };
   }

@@ -6,7 +6,9 @@ import {
   getBotAvatarByName,
   pickUniqueBotAvatar,
   pickUniqueBotAvatars,
+  pickUniqueCharacterAvatar,
   resolveBotAvatar,
+  resolveCharacterAvatar,
 } from './botAvatars.ts';
 import {
   buildFailedTrickEventKey,
@@ -19,12 +21,16 @@ import {
   addLocalLobbySeat,
   buildDefaultPlayers,
   DEFAULT_SETTINGS,
+  loadSettings,
+  resolvePreferredAvatarId,
   sanitizeLocalLobbyConfig,
+  saveSettings,
   updateLocalLobbyPlayer,
   type LocalLobbyConfig,
 } from './settings.ts';
 import { RoomManager } from '../server/roomManager.ts';
 import { playCard, continueAfterTrick } from '../engine/index.ts';
+import { getBotReliefMotionStyle } from './facialExpressions.ts';
 
 const EXPECTED_12_BOTS: ReadonlyArray<{ name: string; personality: string }> = [
   { name: 'Chotu Chaiwala', personality: 'Stylish and witty' },
@@ -70,7 +76,7 @@ describe('Fictional Indian Bot Avatar Collection (12 Characters)', () => {
     assert.equal(slots.size, 12);
   });
 
-  it('resolves bot avatars accurately and never assigns a bot avatar to human players', () => {
+  it('resolves character avatars for both bots and humans with explicit avatarId while never falsely matching humans by display name alone', () => {
     for (const profile of BOT_AVATAR_PROFILES) {
       const byId = resolveBotAvatar({ type: 'bot', botAvatarId: profile.id, name: profile.name });
       assert.equal(byId?.id, profile.id);
@@ -78,16 +84,28 @@ describe('Fictional Indian Bot Avatar Collection (12 Characters)', () => {
 
       const byName = resolveBotAvatar({ type: 'bot', name: profile.name });
       assert.equal(byName?.id, profile.id);
+
+      const humanByAvatarId = resolveCharacterAvatar({
+        type: 'human',
+        avatarId: profile.id,
+        name: 'Aarav',
+      });
+      assert.equal(humanByAvatarId?.id, profile.id);
+      // Every character also maps cleanly to a personalised relief motion style for humans and bots
+      assert.ok(getBotReliefMotionStyle(profile.id));
     }
 
+    // A human who simply types a bot's display name without an explicit avatarId must not falsely match
+    assert.equal(resolveCharacterAvatar({ type: 'human', name: 'Chotu Chaiwala' }), null);
     assert.equal(resolveBotAvatar({ type: 'human', name: 'Chotu Chaiwala' }), null);
+    // Explicit botAvatarId/avatarId on a human resolves cleanly
     assert.equal(
-      resolveBotAvatar({ type: 'human', botAvatarId: 'chotu-chaiwala', name: 'Aarav' }),
-      null
+      resolveCharacterAvatar({ type: 'human', botAvatarId: 'chotu-chaiwala', name: 'Aarav' })?.id,
+      'chotu-chaiwala'
     );
   });
 
-  it('picks 12 distinct bots without duplicates and avoids human player name collisions', () => {
+  it('picks 12 distinct characters without duplicates, avoids collisions, and respects savedAvatarId > preferredAvatarId precedence', () => {
     const rng = createSeededRng(101);
     const allTwelve = pickUniqueBotAvatars(12, { rng });
     assert.equal(new Set(allTwelve.map((p) => p.id)).size, 12);
@@ -97,17 +115,52 @@ describe('Fictional Indian Bot Avatar Collection (12 Characters)', () => {
       rng: () => 0,
     });
     assert.notEqual(avoided.name.toLowerCase(), 'chotu chaiwala');
+
+    // Future registered-account savedAvatarId takes precedence over guest preferredAvatarId
+    const registeredWins = pickUniqueCharacterAvatar({
+      savedAvatarId: 'surili',
+      preferredAvatarId: 'babloo-uncle',
+      usedAvatarIds: ['gappu'],
+      rng,
+    });
+    assert.equal(registeredWins.profile.id, 'surili');
+    assert.equal(registeredWins.wasReassigned, false);
+
+    // When preferred character is already taken in a room, auto-assigns an unused character
+    const collision = pickUniqueCharacterAvatar({
+      preferredAvatarId: 'babloo-uncle',
+      usedAvatarIds: ['babloo-uncle', 'surili'],
+      rng,
+    });
+    assert.equal(collision.wasReassigned, true);
+    assert.notEqual(collision.profile.id, 'babloo-uncle');
+    assert.notEqual(collision.profile.id, 'surili');
+
+    assert.equal(
+      resolvePreferredAvatarId({ savedAvatarId: 'wifi-baba', selectedAvatarId: 'gappu' }),
+      'wifi-baba'
+    );
+    assert.equal(
+      resolvePreferredAvatarId({ savedAvatarId: null, selectedAvatarId: 'gappu' }),
+      'gappu'
+    );
+    assert.equal(resolvePreferredAvatarId({ savedAvatarId: null, selectedAvatarId: '' }), undefined);
   });
 
-  it('assigns unique bot avatars in local Practice vs Bots and strips botAvatarId when toggled to human', () => {
-    const players = buildDefaultPlayers(6, 'Ranjit', 'bots', createSeededRng(7));
+  it('assigns unique character avatars across all human and bot seats in local modes and persists selectedAvatarId in localStorage', () => {
+    const players = buildDefaultPlayers(6, 'Ranjit', 'bots', createSeededRng(7), 'rocky-raja');
+    assert.equal(players[0].type, 'human');
+    assert.equal(players[0].avatarId, 'rocky-raja');
+    assert.equal(players[0].botAvatarId, 'rocky-raja');
+
     const bots = players.filter((p) => p.type === 'bot');
     assert.equal(bots.length, 5);
-    assert.equal(new Set(bots.map((b) => b.botAvatarId)).size, 5);
+    assert.equal(new Set(players.map((p) => p.avatarId)).size, 6, 'All 6 seats (human + bots) must have unique characters');
     for (const b of bots) {
       const profile = getBotAvatarById(b.botAvatarId);
       assert.ok(profile);
       assert.equal(b.name, profile.name);
+      assert.notEqual(b.avatarId, 'rocky-raja');
     }
 
     let lobby: LocalLobbyConfig = sanitizeLocalLobbyConfig({
@@ -120,20 +173,53 @@ describe('Fictional Indian Bot Avatar Collection (12 Characters)', () => {
       players: buildDefaultPlayers(3, 'Ranjit', 'bots', createSeededRng(9)),
     });
     lobby = addLocalLobbySeat(lobby);
-    const botIds = lobby.players.filter((p) => p.type === 'bot').map((p) => p.botAvatarId);
-    assert.equal(new Set(botIds).size, 3);
+    assert.equal(new Set(lobby.players.map((p) => p.avatarId)).size, 4);
 
-    // Toggle bot seat to human -> clears botAvatarId
+    // Toggle bot seat to human -> keeps a valid unique character avatar (does not strip it)
     lobby = updateLocalLobbyPlayer(lobby, 1, { type: 'human' });
     assert.equal(lobby.players[1].type, 'human');
-    assert.equal(lobby.players[1].botAvatarId, undefined);
+    assert.ok(getBotAvatarById(lobby.players[1].avatarId));
+    assert.equal(new Set(lobby.players.map((p) => p.avatarId)).size, 4);
 
-    // Toggle back to bot -> receives a unique unused bot avatar
+    // Choosing another seat's character avatar swaps cleanly without duplicates
+    const seat2Avatar = lobby.players[2].avatarId!;
+    const seat0AvatarBefore = lobby.players[0].avatarId!;
+    lobby = updateLocalLobbyPlayer(lobby, 0, { avatarId: seat2Avatar });
+    assert.equal(lobby.players[0].avatarId, seat2Avatar);
+    assert.equal(lobby.players[2].avatarId, seat0AvatarBefore);
+    assert.equal(new Set(lobby.players.map((p) => p.avatarId)).size, 4);
+
+    // Toggle back to bot -> still unique across all seats
     lobby = updateLocalLobbyPlayer(lobby, 1, { type: 'bot' });
     assert.equal(lobby.players[1].type, 'bot');
     assert.ok(getBotAvatarById(lobby.players[1].botAvatarId));
-    const afterBotIds = lobby.players.filter((p) => p.type === 'bot').map((p) => p.botAvatarId);
-    assert.equal(new Set(afterBotIds).size, 3);
+    assert.equal(new Set(lobby.players.map((p) => p.avatarId)).size, 4);
+
+    // Verify localStorage persistence for selectedAvatarId
+    const backing = new Map<string, string>();
+    const prevStorage = (globalThis as { localStorage?: Storage }).localStorage;
+    (globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        backing.set(k, v);
+      },
+      removeItem: (k: string) => {
+        backing.delete(k);
+      },
+      clear: () => backing.clear(),
+      key: (i: number) => Array.from(backing.keys())[i] ?? null,
+      get length() {
+        return backing.size;
+      },
+    } as Storage;
+    try {
+      saveSettings({ ...DEFAULT_SETTINGS, playerName: 'Ranjit', selectedAvatarId: 'wifi-baba' });
+      const reloaded = loadSettings();
+      assert.equal(reloaded.selectedAvatarId, 'wifi-baba');
+      assert.equal(reloaded.playerName, 'Ranjit');
+    } finally {
+      (globalThis as { localStorage?: Storage }).localStorage = prevStorage;
+    }
   });
 
   it('assigns authoritative unique bot avatars across 2/3/4/6-player multiplayer rooms, syncs across clients, and preserves across reconnect & rematch', () => {

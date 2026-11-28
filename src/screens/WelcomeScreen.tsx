@@ -13,6 +13,8 @@ import {
   User,
   Users,
 } from 'lucide-react';
+import { AvatarPicker } from '../components/AvatarPicker';
+import { PlayerAvatar } from '../components/BotAvatar';
 import {
   FacialExpressionDemoModal,
   type ExpressionDemoTab,
@@ -20,21 +22,25 @@ import {
 import { PlayingCard } from '../components/PlayingCard';
 import { PWAInstallButton } from '../components/PWAInstallButton';
 import { DIFFICULTY_META, makeCard } from '../engine';
+import { getBotAvatarById } from '../lib/botAvatars';
 import { fetchPublicRoomsResult, validateRoomInvite } from '../lib/multiplayerClient';
 import type { PublicRoomSummary } from '../server/roomTypes';
 
 interface WelcomeScreenProps {
   initialPlayerName: string;
+  initialAvatarId: string;
   incomingInvite: { roomCode: string; inviteToken?: string } | null;
   onClearIncomingInvite: () => void;
   onSavePlayerName: (name: string) => void;
-  onOpenCreateRoom: (playerName: string) => void;
-  onOpenPractice: (playerName: string) => void;
-  onOpenPassAndPlay: (playerName: string) => void;
+  onSaveAvatarId: (avatarId: string) => void;
+  onOpenCreateRoom: (playerName: string, avatarId?: string) => void;
+  onOpenPractice: (playerName: string, avatarId?: string) => void;
+  onOpenPassAndPlay: (playerName: string, avatarId?: string) => void;
   onJoinOnlineRoom: (params: {
     roomCode: string;
     playerName: string;
     inviteToken?: string;
+    avatarId?: string;
   }) => void;
   onHowToPlay: () => void;
   onSettings: () => void;
@@ -51,9 +57,11 @@ const HERO_CARDS = [
 
 export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   initialPlayerName,
+  initialAvatarId,
   incomingInvite,
   onClearIncomingInvite,
   onSavePlayerName,
+  onSaveAvatarId,
   onOpenCreateRoom,
   onOpenPractice,
   onOpenPassAndPlay,
@@ -64,6 +72,8 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onDismissError,
 }) => {
   const [name, setName] = useState(initialPlayerName);
+  const [selectedAvatarId, setSelectedAvatarId] = useState(initialAvatarId);
+  const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
   const [roomCode, setRoomCode] = useState(incomingInvite?.roomCode ?? '');
   const [joinError, setJoinError] = useState<string | null>(null);
   const [inviteInfo, setInviteInfo] = useState<string | null>(null);
@@ -75,6 +85,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   const [joiningRoomCode, setJoiningRoomCode] = useState<string | null>(null);
   const [capacityFilter, setCapacityFilter] = useState<number | 'all'>('all');
   const [openOnlyFilter, setOpenOnlyFilter] = useState(false);
+
+  const selectedAvatarProfile = getBotAvatarById(selectedAvatarId);
+  const chosenAvatarOrUndefined = selectedAvatarProfile?.id;
+
+  const handleSelectAvatar = (nextAvatarId: string) => {
+    setSelectedAvatarId(nextAvatarId);
+    onSaveAvatarId(nextAvatarId);
+  };
   const [expressionDemoOpen, setExpressionDemoOpen] = useState(() => {
     if (typeof window === 'undefined') return false;
     const demoParam = new URLSearchParams(window.location.search).get('demo');
@@ -194,6 +212,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       roomCode: cleaned,
       playerName: safeName(),
       inviteToken: tokenToUse,
+      avatarId: chosenAvatarOrUndefined,
     });
   };
 
@@ -219,6 +238,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     onJoinOnlineRoom({
       roomCode: room.roomCode,
       playerName: safeName(),
+      avatarId: chosenAvatarOrUndefined,
     });
   };
 
@@ -343,29 +363,78 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
           {/* Left / Primary Column (Matches Emergent Home Reference) */}
           <div className="lg:col-span-6 w-full max-w-lg mx-auto lg:max-w-none space-y-4">
-            {/* Soft Beige Nickname Input */}
-            <div>
-              <label
-                htmlFor="home-nickname"
-                className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
-              >
-                Your name
-              </label>
-              <input
-                id="home-nickname"
-                type="text"
-                maxLength={20}
-                value={name}
-                onChange={(e) => persistName(e.target.value)}
-                placeholder="Enter your nickname"
-                className="w-full min-h-[54px] px-4 rounded-2xl bg-[#EFE6D8] border border-[#DDD1BE] text-base font-medium text-[#261E18] placeholder:text-[#8E7F6F] focus:outline-none focus:border-[#D95732] focus:bg-[#F5EEE2] transition-colors"
-              />
+            {/* Soft Beige Nickname Input + Guest Character Avatar Selector */}
+            <div className="space-y-2.5">
+              <div>
+                <label
+                  htmlFor="home-nickname"
+                  className="block text-sm font-semibold text-[#3A2E25] mb-1.5"
+                >
+                  Your name
+                </label>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setAvatarPickerOpen((prev) => !prev)}
+                    aria-expanded={avatarPickerOpen}
+                    aria-label="Choose your character avatar"
+                    title={
+                      selectedAvatarProfile
+                        ? `${selectedAvatarProfile.name} — tap to change avatar`
+                        : 'Auto-assign character — tap to choose avatar'
+                    }
+                    className="shrink-0 min-h-[54px] px-2.5 rounded-2xl bg-[#EFE6D8] hover:bg-[#E7DCCB] border border-[#DDD1BE] flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    {selectedAvatarProfile ? (
+                      <PlayerAvatar
+                        name={selectedAvatarProfile.name}
+                        type="human"
+                        avatarColor={selectedAvatarProfile.accentColor}
+                        avatarId={selectedAvatarProfile.id}
+                        size="sm"
+                        animated={false}
+                      />
+                    ) : (
+                      <span className="w-9 h-9 rounded-full bg-[#365B40] text-[#FAF5ED] flex items-center justify-center text-xs font-bold">
+                        Auto
+                      </span>
+                    )}
+                    <span className="text-xs font-semibold text-[#3A2E25] hidden sm:inline max-w-[78px] truncate">
+                      {selectedAvatarProfile ? selectedAvatarProfile.name.split(' ')[0] : 'Avatar'}
+                    </span>
+                  </button>
+
+                  <input
+                    id="home-nickname"
+                    type="text"
+                    maxLength={20}
+                    value={name}
+                    onChange={(e) => persistName(e.target.value)}
+                    placeholder="Enter your nickname"
+                    className="flex-1 min-w-0 min-h-[54px] px-4 rounded-2xl bg-[#EFE6D8] border border-[#DDD1BE] text-base font-medium text-[#261E18] placeholder:text-[#8E7F6F] focus:outline-none focus:border-[#D95732] focus:bg-[#F5EEE2] transition-colors"
+                  />
+                </div>
+              </div>
+
+              {avatarPickerOpen && (
+                <div className="rounded-2xl bg-[#EFE6D8] border border-[#DFD3C1] p-3.5 shadow-xs">
+                  <AvatarPicker
+                    selectedAvatarId={selectedAvatarId}
+                    onSelect={(id) => {
+                      handleSelectAvatar(id);
+                      if (id) setAvatarPickerOpen(false);
+                    }}
+                    allowAuto
+                    compact
+                  />
+                </div>
+              )}
             </div>
 
             {/* Orange Create Room CTA */}
             <button
               type="button"
-              onClick={() => onOpenCreateRoom(safeName())}
+              onClick={() => onOpenCreateRoom(safeName(), chosenAvatarOrUndefined)}
               className="w-full min-h-[56px] px-6 py-3.5 rounded-full btn-orange-3d font-bold text-lg transition-all flex items-center justify-center gap-2.5 cursor-pointer"
             >
               <span className="w-6 h-6 rounded-full bg-white text-[#D95732] flex items-center justify-center shrink-0">
@@ -377,7 +446,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             {/* Dark Green Practice vs Bots CTA */}
             <button
               type="button"
-              onClick={() => onOpenPractice(safeName())}
+              onClick={() => onOpenPractice(safeName(), chosenAvatarOrUndefined)}
               className="w-full min-h-[56px] px-6 py-3.5 rounded-full btn-forest-3d font-bold text-lg transition-all flex items-center justify-center gap-2.5 cursor-pointer"
             >
               <Bot className="w-5 h-5" />
@@ -387,7 +456,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             {/* Secondary Pass-and-Play Local Mode */}
             <button
               type="button"
-              onClick={() => onOpenPassAndPlay(safeName())}
+              onClick={() => onOpenPassAndPlay(safeName(), chosenAvatarOrUndefined)}
               className="w-full min-h-[48px] px-5 py-2.5 rounded-2xl bg-[#EFE6D8] hover:bg-[#E7DCCB] border border-[#DDD1BE] text-[#3A2E25] font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
             >
               <Users className="w-4 h-4 text-[#365B40]" />

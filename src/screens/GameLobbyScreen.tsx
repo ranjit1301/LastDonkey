@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { DIFFICULTY_META, getDealingCounts, type PlayerConfig } from '../engine';
+import { AvatarPicker } from '../components/AvatarPicker';
 import { PlayerAvatar } from '../components/BotAvatar';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { DifficultySelector } from '../components/DifficultySelector';
@@ -45,6 +46,7 @@ interface GameLobbyScreenProps {
   // Online multiplayer actions
   onOnlineAddBot?: () => void;
   onOnlineRemoveSeat?: (targetPlayerId: string) => void;
+  onOnlineUpdateAvatar?: (avatarId: string) => void;
   onOnlineStartGame?: () => void;
   onOnlineCancelRoom?: () => void;
   onOnlineRevokeInvite?: () => void;
@@ -65,6 +67,7 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
   onLeave,
   onOnlineAddBot,
   onOnlineRemoveSeat,
+  onOnlineUpdateAvatar,
   onOnlineStartGame,
   onOnlineCancelRoom,
   onOnlineRevokeInvite,
@@ -77,6 +80,7 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
   onReturnHome,
 }) => {
   const [copiedType, setCopiedType] = useState<'code' | 'link' | null>(null);
+  const [editingAvatarSeatKey, setEditingAvatarSeatKey] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -425,11 +429,12 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                       </button>
                     )}
 
-                    {/* Avatar Circle (Fictional Indian caricature for bots; classic initial circle for humans) */}
+                    {/* Avatar Circle (12 approved characters for both human and bot players) */}
                     <PlayerAvatar
                       name={seat.name}
                       type={seat.type}
                       avatarColor={seat.avatarColor}
+                      avatarId={seat.avatarId ?? seat.botAvatarId}
                       botAvatarId={seat.botAvatarId}
                       playerId={seat.playerId}
                       size="lg"
@@ -456,6 +461,21 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                                   : 'Disconnected'}
                     </div>
 
+                    {isYou && onlineRoom.status === 'waiting' && onOnlineUpdateAvatar && (
+                      <button
+                        type="button"
+                        disabled={isOnlineDisconnected}
+                        onClick={() =>
+                          setEditingAvatarSeatKey((prev) =>
+                            prev === seat.playerId ? null : seat.playerId
+                          )
+                        }
+                        className="mt-2 px-2.5 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {editingAvatarSeatKey === seat.playerId ? 'Close' : 'Change Avatar'}
+                      </button>
+                    )}
+
                     {canTransfer && (
                       <button
                         type="button"
@@ -471,6 +491,7 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
               })
             : localConfig?.players.map((player, index) => {
                 const isHost = index === 0;
+                const seatKey = `local:${index}`;
                 return (
                   <div
                     key={player.id}
@@ -491,6 +512,7 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                       name={player.name}
                       type={player.type}
                       avatarColor={player.avatarColor ?? AVATAR_COLORS[index % 6]}
+                      avatarId={player.avatarId ?? player.botAvatarId}
                       botAvatarId={player.botAvatarId}
                       playerId={player.id}
                       size="lg"
@@ -537,6 +559,18 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
                         )}
                       </button>
                     )}
+
+                    {player.type === 'human' && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingAvatarSeatKey((prev) => (prev === seatKey ? null : seatKey))
+                        }
+                        className="mt-2 px-2.5 py-1 rounded-lg bg-[#FAF5ED] border border-[#D8CBB8] text-[11px] font-semibold text-[#3A2E25] hover:border-[#D95732] transition-colors cursor-pointer"
+                      >
+                        {editingAvatarSeatKey === seatKey ? 'Close' : 'Change Avatar'}
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -571,6 +605,79 @@ export const GameLobbyScreen: React.FC<GameLobbyScreenProps> = ({
             </button>
           ))}
         </div>
+
+        {/* Inline Waiting-Lobby Avatar Picker Panel */}
+        {editingAvatarSeatKey &&
+          (() => {
+            if (onlineRoom && onlineRoom.status === 'waiting') {
+              const yourSeat = onlineRoom.seats.find(
+                (s) => s.playerId === onlineRoom.yourPlayerId && s.playerId === editingAvatarSeatKey
+              );
+              if (!yourSeat || !onOnlineUpdateAvatar) return null;
+              const takenIds = new Set(
+                onlineRoom.seats
+                  .filter((s) => s.playerId !== yourSeat.playerId)
+                  .map((s) => s.avatarId ?? s.botAvatarId)
+                  .filter((id): id is string => Boolean(id))
+              );
+              return (
+                <section className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-display text-base font-bold text-[#261E18]">
+                      Choose Avatar for {yourSeat.name}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingAvatarSeatKey(null)}
+                      className="text-xs font-semibold text-[#6E6052] hover:text-[#261E18] cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+                  <AvatarPicker
+                    selectedAvatarId={yourSeat.avatarId ?? yourSeat.botAvatarId ?? ''}
+                    takenAvatarIds={takenIds}
+                    onSelect={(avatarId) => {
+                      if (!avatarId) return;
+                      onOnlineUpdateAvatar(avatarId);
+                      setEditingAvatarSeatKey(null);
+                    }}
+                  />
+                </section>
+              );
+            }
+
+            if (localConfig && editingAvatarSeatKey.startsWith('local:')) {
+              const idx = Number(editingAvatarSeatKey.slice('local:'.length));
+              const target = localConfig.players[idx];
+              if (!target || target.type !== 'human') return null;
+              return (
+                <section className="rounded-3xl bg-[#F4ECE0] border border-[#E2D6C4] p-4 sm:p-5 shadow-xs space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-display text-base font-bold text-[#261E18]">
+                      Choose Avatar for {target.name}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingAvatarSeatKey(null)}
+                      className="text-xs font-semibold text-[#6E6052] hover:text-[#261E18] cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+                  <AvatarPicker
+                    selectedAvatarId={target.avatarId ?? target.botAvatarId ?? ''}
+                    onSelect={(avatarId) => {
+                      if (!avatarId) return;
+                      updateLocalPlayer(idx, { avatarId, botAvatarId: avatarId });
+                      setEditingAvatarSeatKey(null);
+                    }}
+                  />
+                </section>
+              );
+            }
+            return null;
+          })()}
       </main>
 
       {/* Bottom Sticky Action Footer (Matches Screenshot) */}

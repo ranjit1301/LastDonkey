@@ -108,6 +108,11 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
   const viewerPlayer = onlineRoom
     ? gameState.players.find((p) => p.id === onlineRoom.yourPlayerId) ?? null
     : humanPlayer;
+  const isRemovedLoser = Boolean(donkeyPlayer?.removed);
+  const twoPlayerForfeitWinner =
+    gameState.players.length === 2 && isRemovedLoser
+      ? gameState.players.find((p) => p.finished && p.id !== donkeyPlayer?.id) ?? null
+      : null;
   const viewerFinishedSafe =
     Boolean(viewerPlayer?.finished) && viewerPlayer?.id !== gameState.donkeyPlayerId;
 
@@ -160,12 +165,36 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
           </section>
         ) : (
           <section className="rounded-3xl felt-surface p-6 sm:p-8 text-center flex flex-col items-center shadow-lg">
-            {donkeyPlayer ? (
+            {donkeyPlayer && isRemovedLoser ? (
+              <div
+                className="mt-4 flex flex-col items-center"
+                data-donkey-ears-suppressed="true"
+              >
+                <PlayerAvatar
+                  name={donkeyPlayer.name}
+                  type={donkeyPlayer.type}
+                  avatarColor={donkeyPlayer.avatarColor}
+                  avatarId={donkeyPlayer.avatarId ?? donkeyPlayer.botAvatarId}
+                  botAvatarId={donkeyPlayer.botAvatarId}
+                  playerId={donkeyPlayer.id}
+                  size="xl"
+                  expression="sad"
+                  expressionIntensity={1}
+                  disconnected
+                  showHumanFace
+                  animated={animationsActive}
+                />
+                <span className="mt-2.5 inline-flex items-center gap-1 rounded-full bg-[#3A1414]/90 border border-[#F87171]/60 px-3 py-0.5 text-[11px] font-extrabold uppercase tracking-wider text-[#FECACA] shadow-sm">
+                  Exited · Lost
+                </span>
+              </div>
+            ) : donkeyPlayer ? (
               <div className="mt-4 flex flex-col items-center">
                 <PlayerAvatar
                   name={donkeyPlayer.name}
                   type={donkeyPlayer.type}
                   avatarColor={donkeyPlayer.avatarColor}
+                  avatarId={donkeyPlayer.avatarId ?? donkeyPlayer.botAvatarId}
                   botAvatarId={donkeyPlayer.botAvatarId}
                   playerId={donkeyPlayer.id}
                   size="xl"
@@ -183,10 +212,22 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
             )}
 
             <p className="mt-3 text-xs sm:text-sm font-semibold text-[#F5C954]">
-              {donkeyPlayer ? 'The Last Donkey Is' : 'Simultaneous Finish'}
+              {donkeyPlayer && isRemovedLoser
+                ? twoPlayerForfeitWinner
+                  ? 'Match Won by Opponent Exit'
+                  : 'Player Exited'
+                : donkeyPlayer
+                  ? 'The Last Donkey Is'
+                  : 'Simultaneous Finish'}
             </p>
             <h1 className="mt-1 font-display text-3xl sm:text-5xl font-bold text-white">
-              {donkeyPlayer ? donkeyPlayer.name : 'No Donkey This Round'}
+              {donkeyPlayer && isRemovedLoser
+                ? twoPlayerForfeitWinner
+                  ? `${twoPlayerForfeitWinner.name} Wins!`
+                  : `${donkeyPlayer.name} Lost`
+                : donkeyPlayer
+                  ? donkeyPlayer.name
+                  : 'No Donkey This Round'}
             </h1>
             {gameState.endReason && (
               <p className="mt-2 text-sm text-[#D6E8DC] max-w-md">{gameState.endReason}</p>
@@ -362,6 +403,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                             name={p.name}
                             type={p.type}
                             avatarColor={p.avatarColor}
+                            avatarId={p.avatarId ?? p.botAvatarId}
                             botAvatarId={p.botAvatarId}
                             playerId={p.id}
                             size="xs"
@@ -372,7 +414,11 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                       <span className="font-semibold text-[#261E18] truncate">{names}</span>
                     </div>
                     <span className="text-xs font-semibold text-[#365B40] shrink-0">
-                      {group.length > 1 ? 'Simultaneous Safe' : 'Safe'}
+                      {twoPlayerForfeitWinner && group.includes(twoPlayerForfeitWinner.id)
+                        ? 'Winner'
+                        : group.length > 1
+                          ? 'Simultaneous Safe'
+                          : 'Safe'}
                     </span>
                   </div>
                 );
@@ -382,21 +428,23 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                 <div className="py-2.5 flex items-center justify-between gap-3 text-sm">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span className="font-mono font-bold text-xs text-[#D95732] w-8 shrink-0">
-                      Last
+                      {isRemovedLoser ? 'Lost' : 'Last'}
                     </span>
                     <PlayerAvatar
                       name={donkeyPlayer.name}
                       type={donkeyPlayer.type}
                       avatarColor={donkeyPlayer.avatarColor}
+                      avatarId={donkeyPlayer.avatarId ?? donkeyPlayer.botAvatarId}
                       botAvatarId={donkeyPlayer.botAvatarId}
                       playerId={donkeyPlayer.id}
                       size="xs"
+                      disconnected={isRemovedLoser}
                       animated={false}
                     />
                     <span className="font-bold text-[#261E18] truncate">{donkeyPlayer.name}</span>
                   </div>
                   <span className="text-xs font-bold text-[#D95732] shrink-0 tabular-nums">
-                    Donkey ({donkeyPlayer.hand.length})
+                    {isRemovedLoser ? 'Exited · Lost' : `Donkey (${donkeyPlayer.hand.length})`}
                   </span>
                 </div>
               )}
@@ -415,6 +463,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                         name={p.name}
                         type={p.type}
                         avatarColor={p.avatarColor}
+                        avatarId={p.avatarId ?? p.botAvatarId}
                         botAvatarId={p.botAvatarId}
                         playerId={p.id}
                         size="xs"
@@ -430,7 +479,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                 ))}
 
               {gameState.players
-                .filter((p) => p.removed)
+                .filter((p) => p.removed && p.id !== gameState.donkeyPlayerId)
                 .map((p) => (
                   <div
                     key={p.id}
@@ -441,6 +490,7 @@ export const GameResultsScreen: React.FC<GameResultsScreenProps> = ({
                         name={p.name}
                         type={p.type}
                         avatarColor={p.avatarColor}
+                        avatarId={p.avatarId ?? p.botAvatarId}
                         botAvatarId={p.botAvatarId}
                         playerId={p.id}
                         size="xs"

@@ -21,6 +21,7 @@ import {
   markPlayerConnection,
   playCard,
   removePlayerAndRedistribute,
+  shuffleDeck,
   type DifficultyMode,
   type GameState,
   type PlayerConfig,
@@ -1187,4 +1188,134 @@ describe('14. Bot Memory Persistence & Selective Invalidation After Player Remov
     assert.equal(seenIds.size, legalIds.size);
   });
 });
+
+describe('2-Player Shuffle Fairness & 2-Player Exit / Removal Rules', () => {
+  it('verifies Fisher–Yates 2-player shuffle fairness across 10,000 simulated deals', () => {
+    const TRIALS = 10_000;
+    const rng = createSeededRng(20261128);
+    const cardToP0 = new Map<string, number>();
+    let totalSuitCards = 0;
+    let totalSuitSlots = 0;
+    let rawAdjSameSuitPairs = 0;
+    let totalRawAdjSlots = 0;
+
+    for (let t = 0; t < TRIALS; t++) {
+      const deck = shuffleDeck(createDeck(), rng);
+      const hands = dealCards(deck, 2);
+      assert.equal(hands[0].length, 26);
+      assert.equal(hands[1].length, 26);
+
+      const seen = new Set<string>();
+      for (const c of hands[0]) {
+        seen.add(c.id);
+        cardToP0.set(c.id, (cardToP0.get(c.id) ?? 0) + 1);
+      }
+      for (const c of hands[1]) {
+        seen.add(c.id);
+      }
+      assert.equal(seen.size, 52, 'Every 2-player deal must contain all 52 unique cards');
+
+      for (const hand of hands) {
+        const sc: Record<string, number> = { spades: 0, hearts: 0, clubs: 0, diamonds: 0 };
+        for (const c of hand) sc[c.suit]++;
+        for (const count of Object.values(sc)) {
+          totalSuitCards += count;
+          totalSuitSlots++;
+        }
+        for (let i = 0; i < hand.length - 1; i++) {
+          totalRawAdjSlots++;
+          if (hand[i].suit === hand[i + 1].suit) {
+            rawAdjSameSuitPairs++;
+          }
+        }
+      }
+    }
+
+    assert.equal(cardToP0.size, 52);
+    const expectedP0 = TRIALS / 2;
+    const stdDev = Math.sqrt(TRIALS * 0.25);
+    for (const [cardId, count] of cardToP0.entries()) {
+      const z = Math.abs(count - expectedP0) / stdDev;
+      assert.ok(
+        z < 4.5,
+        `Card ${cardId} deal rate deviated unexpectedly (${count}/${TRIALS}, z=${z.toFixed(2)})`
+      );
+    }
+
+    const meanCardsPerSuit = totalSuitCards / totalSuitSlots;
+    assert.ok(
+      meanCardsPerSuit > 6.45 && meanCardsPerSuit < 6.55,
+      `Expected ~6.50 cards/suit, got ${meanCardsPerSuit.toFixed(4)}`
+    );
+
+    // Raw dealt order adjacent same-suit probability should match exact theory: 12/51 ≈ 0.2353
+    const adjSameSuitRate = rawAdjSameSuitPairs / totalRawAdjSlots;
+    assert.ok(
+      adjSameSuitRate > 0.225 && adjSameSuitRate < 0.245,
+      `Expected raw adjacent same-suit rate ~0.2353, got ${adjSameSuitRate.toFixed(4)}`
+    );
+  });
+
+  it('in a 2-player game, voluntary exit between tricks makes the exiting player lose and the remaining player win with zero card redistribution', () => {
+    const initial = createInitialGameState(makePlayers(2), {
+      customHands: [
+        [makeCard('spades', 14), makeCard('hearts', 9), makeCard('clubs', 7)],
+        [makeCard('spades', 10), makeCard('diamonds', 8), makeCard('hearts', 4)],
+      ],
+    });
+
+    // Mid-trick voluntary exit remains strictly blocked in 2-player games
+    const mid = (playCard(initial, 'p1', 'spades-14') as { ok: true; state: GameState }).state;
+    const midExit = removePlayerAndRedistribute(mid, 'p1', 'voluntary_exit');
+    assert.equal(midExit.ok, false);
+
+    // Complete trick 1 -> between tricks
+    let between = (playCard(mid, 'p2', 'spades-10') as { ok: true; state: GameState }).state;
+    between = continueAfterTrick(between);
+
+    const exited = removePlayerAndRedistribute(between, 'p1', 'voluntary_exit');
+    assert.equal(exited.ok, true);
+    if (!exited.ok) return;
+
+    assert.equal(exited.state.phase, 'finished');
+    assert.equal(exited.state.currentTurnPlayerId, null);
+    assert.equal(exited.state.donkeyPlayerId, 'p1', 'Exiting player must be marked as the loser');
+    assert.deepEqual(exited.state.finishOrder, ['p2']);
+    assert.deepEqual(exited.state.finishGroups, [['p2']]);
+
+    const p1 = exited.state.players.find((p) => p.id === 'p1')!;
+    const p2 = exited.state.players.find((p) => p.id === 'p2')!;
+    assert.equal(p1.removed, true);
+    assert.equal(p1.finished, false);
+    assert.equal(p1.hand.length, 0);
+    assert.equal(p2.finished, true);
+    assert.equal(p2.finishOrder, 1);
+    assert.equal(p2.removed, false);
+    assert.equal(p2.hand.length, 2, 'Remaining player must NOT receive redistributed cards');
+    assert.equal(exited.state.lastRedistribution?.cardsDistributedCount, 0);
+    assert.match(exited.state.endReason ?? '', /Player 1 exited the game and loses\. Player 2 wins!/i);
+  });
+
+  it('in a 2-player game, removal after 3 missed turns makes the removed player lose and the remaining player win without redistributing cards', () => {
+    const initial = createInitialGameState(makePlayers(2), {
+      customHands: [
+        [makeCard('spades', 14), makeCard('hearts', 9), makeCard('clubs', 7)],
+        [makeCard('spades', 10), makeCard('diamonds', 8), makeCard('hearts', 4)],
+      ],
+    });
+
+    const removed = removePlayerAndRedistribute(initial, 'p1', 'missed_turns');
+    assert.equal(removed.ok, true);
+    if (!removed.ok) return;
+
+    assert.equal(removed.state.phase, 'finished');
+    assert.equal(removed.state.donkeyPlayerId, 'p1');
+    assert.deepEqual(removed.state.finishOrder, ['p2']);
+    assert.equal(removed.state.lastRedistribution?.cardsDistributedCount, 0);
+    assert.equal(removed.state.players[1].finished, true);
+    assert.equal(removed.state.players[1].hand.length, 3);
+    assert.match(removed.state.endReason ?? '', /3 consecutive missed turns and loses\. Player 2 wins!/i);
+  });
+});
+
 
