@@ -262,3 +262,102 @@ test('all 12 bot characters have personalised Sigh of Relief sprite sheets regis
     );
   }
 });
+
+test('all 12 characters have a registered penalty expression rendering path in BotAvatar.tsx', () => {
+  const botAvatarSource = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../components/BotAvatar.tsx'),
+    'utf8'
+  );
+  const exprSheetsMatch = botAvatarSource.match(
+    /const BOT_EXPRESSION_SHEETS[\s\S]*?=\s*\{([\s\S]*?)\};/
+  );
+  const anchorsMatch = botAvatarSource.match(
+    /export const CHARACTER_FACE_ANCHORS[\s\S]*?=\s*\{([\s\S]*?)\};/
+  );
+  assert.ok(exprSheetsMatch, 'BOT_EXPRESSION_SHEETS registry must exist in BotAvatar.tsx');
+  assert.ok(anchorsMatch, 'CHARACTER_FACE_ANCHORS registry must exist in BotAvatar.tsx');
+
+  const sheetsBody = exprSheetsMatch[1];
+  const anchorsBody = anchorsMatch[1];
+
+  for (const profile of BOT_AVATAR_PROFILES) {
+    const inSheets =
+      sheetsBody.includes(`'${profile.id}':`) ||
+      new RegExp(`\\b${profile.id}\\s*:`).test(sheetsBody);
+    const inAnchors =
+      anchorsBody.includes(`'${profile.id}':`) ||
+      new RegExp(`\\b${profile.id}\\s*:`).test(anchorsBody);
+    assert.ok(
+      inSheets || inAnchors,
+      `Character ${profile.id} (${profile.name}) must have a penalty expression sheet or face-anchor overlay registered`
+    );
+  }
+});
+
+test('obsolete dizzy-star and shock-burst overlays are removed from BotAvatar.tsx and CardTableScreen.tsx', () => {
+  const botAvatarSource = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../components/BotAvatar.tsx'),
+    'utf8'
+  );
+  const cardTableSource = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../screens/CardTableScreen.tsx'),
+    'utf8'
+  );
+
+  assert.equal(
+    botAvatarSource.includes('showDizzyStars'),
+    false,
+    'BotAvatar.tsx must not render obsolete showDizzyStars overlay'
+  );
+  assert.equal(
+    botAvatarSource.includes('showShockBurst'),
+    false,
+    'BotAvatar.tsx must not render obsolete showShockBurst overlay'
+  );
+  assert.equal(
+    cardTableSource.includes('getPlayerStageEffect'),
+    false,
+    'CardTableScreen.tsx must not pass obsolete stageEffect overlays'
+  );
+});
+
+test('human and bot penalty expressions track 1/2/3/4+ returned cards, escalate across consecutive fails, and reset after a successful trick', () => {
+  const playerIds = ['human-p1', 'bot-surili', 'bot-rocky'];
+
+  // Trick 1: human takes 1 card -> annoyed (intensity 1)
+  const t1 = makeFailedOutcome(1, 'human-p1', 1);
+  const afterT1 = derivePlayerExpressionStates({ playerIds, trickHistory: [t1] });
+  assert.equal(afterT1['human-p1'].expression, 'annoyed');
+  assert.equal(afterT1['human-p1'].intensity, 1);
+  assert.equal(afterT1['human-p1'].consecutiveFailStreak, 1);
+
+  // Trick 2: human takes 2 cards consecutively -> shocked (intensity 2, streak 2)
+  const t2 = makeFailedOutcome(2, 'human-p1', 2);
+  const afterT2 = derivePlayerExpressionStates({ playerIds, trickHistory: [t1, t2] });
+  assert.equal(afterT2['human-p1'].expression, 'shocked');
+  assert.equal(afterT2['human-p1'].intensity, 2);
+  assert.equal(afterT2['human-p1'].consecutiveFailStreak, 2);
+
+  // Trick 3: human takes 3 cards consecutively -> escalates from sad -> crying (intensity 3, streak 3)
+  const t3 = makeFailedOutcome(3, 'human-p1', 3);
+  const afterT3 = derivePlayerExpressionStates({ playerIds, trickHistory: [t1, t2, t3] });
+  assert.equal(afterT3['human-p1'].baseExpression, 'sad');
+  assert.equal(afterT3['human-p1'].expression, 'crying');
+  assert.equal(afterT3['human-p1'].intensity, 3);
+  assert.equal(afterT3['human-p1'].consecutiveFailStreak, 3);
+
+  // Trick 4: successful trick resets human streak immediately
+  const t4 = makeSuccessOutcome(4, 'bot-surili');
+  const afterT4 = derivePlayerExpressionStates({ playerIds, trickHistory: [t1, t2, t3, t4] });
+  assert.equal(afterT4['human-p1'].expression, 'normal');
+  assert.equal(afterT4['human-p1'].intensity, 0);
+  assert.equal(afterT4['human-p1'].consecutiveFailStreak, 0);
+
+  // Trick 5: bot-surili takes 4+ cards -> crying (intensity 1, streak 1)
+  const t5 = makeFailedOutcome(5, 'bot-surili', 4);
+  const afterT5 = derivePlayerExpressionStates({ playerIds, trickHistory: [t1, t2, t3, t4, t5] });
+  assert.equal(afterT5['bot-surili'].expression, 'crying');
+  assert.equal(afterT5['bot-surili'].intensity, 1);
+  assert.equal(afterT5['bot-surili'].consecutiveFailStreak, 1);
+});
+

@@ -2957,16 +2957,18 @@ describe('2-Player Online Exit / Removal & Guest Character Avatars', () => {
       );
 
       // Guest with registered savedAvatarId takes precedence over guest avatarId
+      const desiredSavedAvatar = guest2Seat.avatarId === 'wifi-baba' ? 'mishra-ji' : 'wifi-baba';
+      const fallbackGuestAvatar = guest2Seat.avatarId === 'gappu' ? 'surili' : 'gappu';
       const guestSaved = manager.joinRoom({
         roomCode: host.room.roomCode,
         playerName: 'GuestThree',
-        avatarId: 'gappu',
-        savedAvatarId: 'wifi-baba',
+        avatarId: fallbackGuestAvatar,
+        savedAvatarId: desiredSavedAvatar,
       });
       assert.equal(guestSaved.ok, true);
       if (!guestSaved.ok) return;
       const guest3Seat = host.room.seats.find((s) => s.playerId === guestSaved.playerId)!;
-      assert.equal(guest3Seat.avatarId, 'wifi-baba');
+      assert.equal(guest3Seat.avatarId, desiredSavedAvatar);
 
       // Add bot -> must not duplicate any human seat's character avatar
       assert.equal(manager.addBot(host.room.roomCode, host.playerId).ok, true);

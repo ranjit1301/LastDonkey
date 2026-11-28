@@ -207,7 +207,8 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
   // Failed-Trick interactive state
   const [trickHistory, setTrickHistory] = useState<TrickOutcome[]>([]);
   const [target, setTarget] = useState<'bot' | 'human' | 'both'>('both');
-  const [showStageEffects, setShowStageEffects] = useState(false);
+  const [selectedPenaltyBotId, setSelectedPenaltyBotId] = useState<string>('babloo-uncle');
+  const [selectedHumanAvatarId, setSelectedHumanAvatarId] = useState<string>('surili');
 
   const clearReliefTimers = () => {
     for (const id of reliefTimersRef.current) {
@@ -291,12 +292,10 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
     setTrickHistory((prev) => [...prev, makeSimCleanTrick(prev.length + 1)]);
   };
 
-  const activeStageEffect =
-    showStageEffects && botState.expression !== 'normal'
-      ? botState.intensity >= 3 || botState.expression === 'crying'
-        ? 'dizzy'
-        : 'shock'
-      : 'none';
+  const selectedPenaltyBot =
+    RELIEF_DEMO_BOTS.find((b) => b.id === selectedPenaltyBotId) ?? RELIEF_DEMO_BOTS[0];
+  const selectedHumanAvatar =
+    RELIEF_DEMO_BOTS.find((b) => b.id === selectedHumanAvatarId) ?? RELIEF_DEMO_BOTS[1];
 
   const currentFrameMeta =
     RELIEF_FRAME_STEPS.find((s) => s.frame === reliefFrame) ?? RELIEF_FRAME_STEPS[0];
@@ -324,7 +323,7 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
               >
                 {activeTab === 'relief'
                   ? 'Sigh of Relief Preview · All 12 Bots & Human Avatars'
-                  : 'Failed-Trick Expressions · Babloo Uncle & Human'}
+                  : 'Failed-Trick Expressions · All 12 Character Avatars'}
               </h2>
               <p className="text-xs text-[#6E6052] mt-0.5">
                 {activeTab === 'relief'
@@ -698,21 +697,33 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                             : 'text-[#D6E8DC] hover:text-white'
                         }`}
                       >
-                        {mode === 'both' ? 'Both' : mode === 'bot' ? 'Babloo Only' : 'Human Only'}
+                        {mode === 'both' ? 'Both' : mode === 'bot' ? 'Bot Only' : 'Human Only'}
                       </button>
                     ))}
                   </div>
-
-                  <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#DCECE1] cursor-pointer select-none bg-black/20 px-2.5 py-1 rounded-xl border border-white/10">
-                    <input
-                      type="checkbox"
-                      checked={showStageEffects}
-                      onChange={(e) => setShowStageEffects(e.target.checked)}
-                      className="accent-[#F5C954]"
-                    />
-                    Stage FX
-                  </label>
                 </div>
+              </div>
+
+              {/* Character Selector for All 12 Approved Avatars */}
+              <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold text-[#C7DFCE] mr-1">
+                  Bot avatar:
+                </span>
+                {RELIEF_DEMO_BOTS.map((char) => (
+                  <button
+                    key={char.id}
+                    type="button"
+                    data-testid={`penalty-char-btn-${char.id}`}
+                    onClick={() => setSelectedPenaltyBotId(char.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                      selectedPenaltyBot.id === char.id
+                        ? 'bg-[#F5C954] text-[#1D1508]'
+                        : 'bg-black/25 text-[#D6E8DC] hover:text-white border border-white/10'
+                    }`}
+                  >
+                    {char.name}
+                  </button>
+                ))}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
@@ -721,21 +732,16 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                   className="rounded-2xl bg-[#143D22]/90 border border-white/15 p-4 flex items-center gap-4"
                 >
                   <PlayerAvatar
-                    name="Babloo Uncle"
+                    name={selectedPenaltyBot.name}
                     type="bot"
-                    avatarColor="#E7B429"
-                    botAvatarId="babloo-uncle"
+                    avatarColor={selectedPenaltyBot.bgColor}
+                    avatarId={selectedPenaltyBot.id}
+                    botAvatarId={selectedPenaltyBot.id}
                     playerId={DEMO_BOT_ID}
                     size="2xl"
                     expression={botState.expression}
                     expressionIntensity={botState.intensity}
                     failStreak={botState.consecutiveFailStreak}
-                    stageEffect={activeStageEffect}
-                    penaltyDelta={
-                      showStageEffects && botState.lastPenaltyCards > 0
-                        ? botState.lastPenaltyCards
-                        : null
-                    }
                     animated
                   />
                   <div className="min-w-0 space-y-1.5">
@@ -743,7 +749,7 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                       Bot · Penalty Demo
                     </div>
                     <div className="font-display text-xl font-bold text-white leading-tight">
-                      Babloo Uncle
+                      {selectedPenaltyBot.name}
                     </div>
                     <div
                       data-testid="demo-babloo-label"
@@ -780,30 +786,34 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                   <PlayerAvatar
                     name="Aarav"
                     type="human"
-                    avatarColor="#E9B872"
+                    avatarColor={selectedHumanAvatar.bgColor}
+                    avatarId={selectedHumanAvatar.id}
                     playerId={DEMO_HUMAN_ID}
                     size="2xl"
                     expression={humanState.expression}
                     expressionIntensity={humanState.intensity}
                     failStreak={humanState.consecutiveFailStreak}
-                    stageEffect={
-                      showStageEffects && humanState.expression !== 'normal'
-                        ? humanState.intensity >= 3 || humanState.expression === 'crying'
-                          ? 'dizzy'
-                          : 'shock'
-                        : 'none'
-                    }
                     showHumanFace
-                    penaltyDelta={
-                      showStageEffects && humanState.lastPenaltyCards > 0
-                        ? humanState.lastPenaltyCards
-                        : null
-                    }
                     animated
                   />
                   <div className="min-w-0 space-y-1.5">
-                    <div className="text-[11px] font-bold text-[#86EFAC]">
-                      Human Player
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-bold text-[#86EFAC]">
+                        Human Player
+                      </span>
+                      <select
+                        aria-label="Select human demo character"
+                        data-testid="penalty-human-char-select"
+                        value={selectedHumanAvatar.id}
+                        onChange={(e) => setSelectedHumanAvatarId(e.target.value)}
+                        className="rounded-lg bg-black/30 border border-white/15 px-2 py-0.5 text-[11px] font-semibold text-white cursor-pointer"
+                      >
+                        {RELIEF_DEMO_BOTS.map((char) => (
+                          <option key={char.id} value={char.id} className="text-[#261E18]">
+                            {char.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     <div className="font-display text-xl font-bold text-white leading-tight">
                       Aarav (You)
@@ -896,7 +906,7 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
 
             <section data-testid="demo-strip-base">
               <h3 className="font-display text-base font-bold text-[#261E18] mb-2.5">
-                Babloo Uncle · All 4 Penalty Levels (Base · Streak ×1)
+                {selectedPenaltyBot.name} · All 4 Penalty Levels (Base · Streak ×1)
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                 {BASE_LEVEL_SPECS.map((spec) => {
@@ -909,10 +919,11 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                       className="rounded-2xl bg-[#F4ECE0] hover:bg-[#EFE4D3] border border-[#DFD3C1] p-3 flex flex-col items-center text-center gap-2 transition-colors cursor-pointer"
                     >
                       <PlayerAvatar
-                        name="Babloo Uncle"
+                        name={selectedPenaltyBot.name}
                         type="bot"
-                        avatarColor="#E7B429"
-                        botAvatarId="babloo-uncle"
+                        avatarColor={selectedPenaltyBot.bgColor}
+                        avatarId={selectedPenaltyBot.id}
+                        botAvatarId={selectedPenaltyBot.id}
                         size="xl"
                         expression={st.expression}
                         expressionIntensity={st.intensity}
@@ -933,7 +944,7 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
 
             <section data-testid="demo-strip-intense">
               <h3 className="font-display text-base font-bold text-[#261E18] mb-2.5">
-                Babloo Uncle · Increasing Consecutive-Failure Intensity (Streak ×2 → ×3)
+                {selectedPenaltyBot.name} · Increasing Consecutive-Failure Intensity (Streak ×2 → ×3)
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {INTENSE_STREAK_SPECS.map((spec) => {
@@ -952,10 +963,11 @@ export const FacialExpressionDemoModal: React.FC<FacialExpressionDemoModalProps>
                       className="rounded-2xl bg-[#FCEFE8] hover:bg-[#F9E4D8] border border-[#E7C2B0] p-3 flex flex-col items-center text-center gap-2 transition-colors cursor-pointer"
                     >
                       <PlayerAvatar
-                        name="Babloo Uncle"
+                        name={selectedPenaltyBot.name}
                         type="bot"
-                        avatarColor="#E7B429"
-                        botAvatarId="babloo-uncle"
+                        avatarColor={selectedPenaltyBot.bgColor}
+                        avatarId={selectedPenaltyBot.id}
+                        botAvatarId={selectedPenaltyBot.id}
                         size="xl"
                         expression={st.expression}
                         expressionIntensity={st.intensity}

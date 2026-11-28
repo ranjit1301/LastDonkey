@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 import { motion } from 'motion/react';
 import sheet1Url from '../assets/images/avatars_sheet_1_1795809716360.jpg';
 import sheet2Url from '../assets/images/avatars_sheet_2_1795809718411.jpg';
@@ -160,6 +160,742 @@ function isPenaltyExpression(expr: AvatarExpression): expr is PenaltyExpression 
     expr === 'crying'
   );
 }
+
+interface CharacterFaceAnchor {
+  skin: string;
+  mouthPatchColor?: string;
+  browColor: string;
+  browY: number;
+  eyeY: number;
+  lx: number;
+  rx: number;
+  mx: number;
+  my: number;
+  mouthRx: number;
+  mouthRy: number;
+  hasShades?: boolean;
+  hasGlasses?: boolean;
+  hasMustache?: boolean;
+}
+
+/**
+ * Calibrated facial-landmark coordinates (0..100 normalized quadrant space) for the 11 approved
+ * characters that reuse their base illustration portraits for penalty & streak expressions
+ * (Babloo Uncle uses dedicated 2x2 base/intense penalty sprite sheets).
+ */
+export const CHARACTER_FACE_ANCHORS: Readonly<Record<string, CharacterFaceAnchor>> = {
+  'chotu-chaiwala': {
+    skin: '#E69A64',
+    browColor: '#1E1612',
+    browY: 39,
+    eyeY: 49,
+    lx: 48,
+    rx: 65,
+    mx: 55,
+    my: 63,
+    mouthRx: 9.5,
+    mouthRy: 6.5,
+    hasShades: true,
+  },
+  surili: {
+    skin: '#F2B593',
+    browColor: '#2B1B17',
+    browY: 35,
+    eyeY: 43,
+    lx: 45,
+    rx: 65,
+    mx: 57,
+    my: 61,
+    mouthRx: 8.5,
+    mouthRy: 7.5,
+  },
+  'rocky-raja': {
+    skin: '#E69E6C',
+    browColor: '#181414',
+    browY: 39,
+    eyeY: 49,
+    lx: 50,
+    rx: 68,
+    mx: 58,
+    my: 64,
+    mouthRx: 10,
+    mouthRy: 6,
+    hasShades: true,
+  },
+  gappu: {
+    skin: '#F1AF85',
+    browColor: '#221712',
+    browY: 32,
+    eyeY: 40,
+    lx: 41,
+    rx: 59,
+    mx: 50,
+    my: 56,
+    mouthRx: 12,
+    mouthRy: 7.5,
+  },
+  'pappu-viral': {
+    skin: '#ECA579',
+    browColor: '#2A1B14',
+    browY: 36,
+    eyeY: 46,
+    lx: 40,
+    rx: 60,
+    mx: 51,
+    my: 63,
+    mouthRx: 11.5,
+    mouthRy: 6.5,
+    hasGlasses: true,
+  },
+  'selfie-sona': {
+    skin: '#F2B48D',
+    browColor: '#281914',
+    browY: 36,
+    eyeY: 47,
+    lx: 41,
+    rx: 60,
+    mx: 50,
+    my: 63,
+    mouthRx: 9.5,
+    mouthRy: 6,
+    hasShades: true,
+  },
+  'wifi-baba': {
+    skin: '#F1AD82',
+    mouthPatchColor: '#F3EFE6',
+    browColor: '#F4F1EA',
+    browY: 43,
+    eyeY: 50,
+    lx: 42,
+    rx: 58,
+    mx: 50,
+    my: 66,
+    mouthRx: 8.5,
+    mouthRy: 5.5,
+    hasMustache: true,
+  },
+  'kallu-kaka': {
+    skin: '#EEA678',
+    browColor: '#F3F1EC',
+    browY: 37,
+    eyeY: 45,
+    lx: 45,
+    rx: 62,
+    mx: 55,
+    my: 64,
+    mouthRx: 9.5,
+    mouthRy: 5.5,
+    hasMustache: true,
+  },
+  'mishra-ji': {
+    skin: '#E6A174',
+    browColor: '#221814',
+    browY: 32,
+    eyeY: 43,
+    lx: 38,
+    rx: 56,
+    mx: 48,
+    my: 60,
+    mouthRx: 9,
+    mouthRy: 5.5,
+    hasGlasses: true,
+  },
+  'dhamaka-don': {
+    skin: '#DE9568',
+    browColor: '#1B1414',
+    browY: 35,
+    eyeY: 46,
+    lx: 48,
+    rx: 66,
+    mx: 57,
+    my: 63,
+    mouthRx: 9.5,
+    mouthRy: 6,
+    hasShades: true,
+  },
+  'hasmukh-didi': {
+    skin: '#EDA374',
+    browColor: '#231713',
+    browY: 34,
+    eyeY: 42,
+    lx: 38,
+    rx: 56,
+    mx: 47,
+    my: 61,
+    mouthRx: 12,
+    mouthRy: 8,
+  },
+};
+
+/**
+ * Calibrated facial-expression overlay applied directly onto the approved character portraits
+ * for characters without separate penalty sprite sheets. Modifies actual eyebrows, eyes/eyelids,
+ * cheek flush, tears, and mouth for all 4 penalty tiers (1, 2, 3, 4+ cards) and escalating
+ * consecutive-failure streaks (intensity 1 -> 2 -> 3).
+ */
+const CharacterPenaltyFaceOverlay: React.FC<{
+  characterId: string;
+  expression: PenaltyExpression;
+  intensity: ExpressionIntensity;
+}> = ({ characterId, expression, intensity }) => {
+  const uid = useId();
+  const anchor = CHARACTER_FACE_ANCHORS[characterId];
+  if (!anchor) return null;
+
+  const intense = intensity >= 2;
+  const meltdown = intensity >= 3;
+  const {
+    skin,
+    mouthPatchColor = skin,
+    browColor,
+    browY,
+    eyeY,
+    lx,
+    rx,
+    mx,
+    my,
+    mouthRx,
+    mouthRy,
+    hasShades = false,
+  } = anchor;
+
+  const eyeSpan = Math.max(12, rx - lx);
+  const eyeRadius = Math.max(4.4, Math.min(6.4, eyeSpan * 0.3));
+  const cheekY = (eyeY + my) / 2 + 2;
+  const skinGradId = `skin-${uid}`;
+  const mouthGradId = `mouth-${uid}`;
+  const browStroke = browColor === '#F4F1EA' || browColor === '#F3F1EC' ? '#261E18' : 'none';
+
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      aria-hidden="true"
+      data-character-penalty-overlay={expression}
+      data-character-penalty-id={characterId}
+      data-character-penalty-intensity={intensity}
+      className="pointer-events-none absolute inset-0 w-full h-full select-none z-10"
+    >
+      <defs>
+        <radialGradient id={skinGradId} cx="50%" cy="50%" r="50%">
+          <stop offset="68%" stopColor={skin} stopOpacity="0.98" />
+          <stop offset="100%" stopColor={skin} stopOpacity="0" />
+        </radialGradient>
+        <radialGradient id={mouthGradId} cx="50%" cy="50%" r="50%">
+          <stop offset="68%" stopColor={mouthPatchColor} stopOpacity="0.98" />
+          <stop offset="100%" stopColor={mouthPatchColor} stopOpacity="0" />
+        </radialGradient>
+      </defs>
+
+      {/* Soft mood cheek flush on elevated / upset / crying expressions */}
+      {(intense || expression === 'crying' || expression === 'annoyed') && (
+        <>
+          <ellipse
+            cx={lx - 4}
+            cy={cheekY}
+            rx={meltdown ? 8.5 : 6.5}
+            ry={meltdown ? 5.2 : 3.8}
+            fill={expression === 'sad' ? '#60A5FA' : '#E24A3B'}
+            opacity={
+              expression === 'annoyed'
+                ? intense
+                  ? 0.48
+                  : 0.22
+                : meltdown
+                  ? 0.52
+                  : 0.36
+            }
+          />
+          <ellipse
+            cx={rx + 4}
+            cy={cheekY}
+            rx={meltdown ? 8.5 : 6.5}
+            ry={meltdown ? 5.2 : 3.8}
+            fill={expression === 'sad' ? '#60A5FA' : '#E24A3B'}
+            opacity={
+              expression === 'annoyed'
+                ? intense
+                  ? 0.48
+                  : 0.22
+                : meltdown
+                  ? 0.52
+                  : 0.36
+            }
+          />
+        </>
+      )}
+
+      {/* Feathered skin mask over static smile mouth so new expression mouth reads cleanly */}
+      <ellipse
+        cx={mx}
+        cy={my}
+        rx={mouthRx * 1.28}
+        ry={mouthRy * 1.24}
+        fill={`url(#${mouthGradId})`}
+      />
+
+      {/* Feathered skin mask over original calm eyes for non-shades characters */}
+      {!hasShades && (
+        <>
+          <ellipse
+            cx={lx}
+            cy={eyeY}
+            rx={eyeRadius * 1.48}
+            ry={eyeRadius * 1.32}
+            fill={`url(#${skinGradId})`}
+          />
+          <ellipse
+            cx={rx}
+            cy={eyeY}
+            rx={eyeRadius * 1.48}
+            ry={eyeRadius * 1.32}
+            fill={`url(#${skinGradId})`}
+          />
+          {/* Soft brow region blend so repositioned brows don't double-up */}
+          <ellipse
+            cx={lx}
+            cy={browY}
+            rx={eyeRadius * 1.45}
+            ry={4.6}
+            fill={`url(#${skinGradId})`}
+          />
+          <ellipse
+            cx={rx}
+            cy={browY}
+            rx={eyeRadius * 1.45}
+            ry={4.6}
+            fill={`url(#${skinGradId})`}
+          />
+        </>
+      )}
+
+      {/* Soft brow region blend for shades characters (keeps sunglasses 100% untouched) */}
+      {hasShades && (
+        <>
+          <ellipse
+            cx={lx}
+            cy={browY}
+            rx={eyeRadius * 1.35}
+            ry={4.2}
+            fill={`url(#${skinGradId})`}
+          />
+          <ellipse
+            cx={rx}
+            cy={browY}
+            rx={eyeRadius * 1.35}
+            ry={4.2}
+            fill={`url(#${skinGradId})`}
+          />
+        </>
+      )}
+
+      {/* ================================================================= */}
+      {/* LEVEL 1: ANNOYED (1 card) / FUMING ANNOYED (Streak x2)            */}
+      {/* ================================================================= */}
+      {expression === 'annoyed' && (
+        <>
+          {/* Furrowed downward V-brows */}
+          <path
+            d={`M${lx - 6.5} ${browY - (intense ? 3 : 1.5)} L${lx + 5.5} ${browY + (intense ? 3.4 : 2)}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth={intense ? '4.2' : '3.4'}
+            strokeLinecap="round"
+          />
+          <path
+            d={`M${rx + 6.5} ${browY - (intense ? 3 : 1.5)} L${rx - 5.5} ${browY + (intense ? 3.4 : 2)}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth={intense ? '4.2' : '3.4'}
+            strokeLinecap="round"
+          />
+          {browStroke !== 'none' && (
+            <>
+              <path
+                d={`M${lx - 6.5} ${browY - (intense ? 3 : 1.5)} L${lx + 5.5} ${browY + (intense ? 3.4 : 2)}`}
+                fill="none"
+                stroke={browStroke}
+                strokeWidth="1.2"
+                strokeLinecap="round"
+              />
+              <path
+                d={`M${rx + 6.5} ${browY - (intense ? 3 : 1.5)} L${rx - 5.5} ${browY + (intense ? 3.4 : 2)}`}
+                fill="none"
+                stroke={browStroke}
+                strokeWidth="1.2"
+                strokeLinecap="round"
+              />
+            </>
+          )}
+
+          {/* Narrowed half-lidded side-glancing annoyed eyes */}
+          {!hasShades && (
+            <>
+              <ellipse
+                cx={lx}
+                cy={eyeY + 0.5}
+                rx={eyeRadius * 0.95}
+                ry={intense ? eyeRadius * 0.46 : eyeRadius * 0.58}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.1"
+              />
+              <ellipse
+                cx={rx}
+                cy={eyeY + 0.5}
+                rx={eyeRadius * 0.95}
+                ry={intense ? eyeRadius * 0.46 : eyeRadius * 0.58}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.1"
+              />
+              <circle cx={lx + (intense ? 0.5 : 1.3)} cy={eyeY + 0.8} r="2" fill="#261E18" />
+              <circle cx={rx + (intense ? -0.5 : 1.3)} cy={eyeY + 0.8} r="2" fill="#261E18" />
+              {/* Heavy flat upper eyelids */}
+              <path
+                d={`M${lx - eyeRadius} ${eyeY - 1.5} L${lx + eyeRadius} ${eyeY - 0.5}`}
+                stroke="#261E18"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+              />
+              <path
+                d={`M${rx - eyeRadius} ${eyeY - 0.5} L${rx + eyeRadius} ${eyeY - 1.5}`}
+                stroke="#261E18"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+              />
+            </>
+          )}
+
+          {/* Subtle forehead anger crease at streak x2+ */}
+          {intense && (
+            <path
+              d={`M${(lx + rx) / 2 - 2.2} ${browY - 5} L${(lx + rx) / 2} ${browY - 2.5} L${(lx + rx) / 2 + 2.2} ${browY - 5}`}
+              fill="none"
+              stroke="#B91C1C"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+
+          {/* Mouth: grumpy scowl (Lv 1) or clenched gritted teeth (Lv 2+) */}
+          {intense ? (
+            <>
+              <rect
+                x={mx - mouthRx * 0.85}
+                y={my - 3.6}
+                width={mouthRx * 1.7}
+                height={7.4}
+                rx="3"
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.4"
+              />
+              <line
+                x1={mx - mouthRx * 0.72}
+                y1={my + 0.1}
+                x2={mx + mouthRx * 0.72}
+                y2={my + 0.1}
+                stroke="#261E18"
+                strokeWidth="1.5"
+              />
+              <line
+                x1={mx - mouthRx * 0.25}
+                y1={my - 3.4}
+                x2={mx - mouthRx * 0.25}
+                y2={my + 3.6}
+                stroke="#261E18"
+                strokeWidth="1.3"
+              />
+              <line
+                x1={mx + mouthRx * 0.25}
+                y1={my - 3.4}
+                x2={mx + mouthRx * 0.25}
+                y2={my + 3.6}
+                stroke="#261E18"
+                strokeWidth="1.3"
+              />
+            </>
+          ) : (
+            <path
+              d={`M${mx - mouthRx * 0.78} ${my + 2} Q${mx} ${my - 3.2} ${mx + mouthRx * 0.78} ${my + 2.5}`}
+              fill="none"
+              stroke="#261E18"
+              strokeWidth="3.1"
+              strokeLinecap="round"
+            />
+          )}
+        </>
+      )}
+
+      {/* ================================================================= */}
+      {/* LEVEL 2: SHOCKED (2 cards) / HYPER-SHOCKED (Streak x2/x3)         */}
+      {/* ================================================================= */}
+      {expression === 'shocked' && (
+        <>
+          {/* Sky-high arched startled brows */}
+          <path
+            d={`M${lx - 6} ${browY - 1} Q${lx} ${browY - (intense ? 9.5 : 7)} ${lx + 5.5} ${browY - 1.5}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.4"
+            strokeLinecap="round"
+          />
+          <path
+            d={`M${rx - 5.5} ${browY - 1.5} Q${rx} ${browY - (intense ? 9.5 : 7)} ${rx + 6} ${browY - 1}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.4"
+            strokeLinecap="round"
+          />
+
+          {/* Wide-open stunned eyes (or startled lens glint for shades characters) */}
+          {!hasShades ? (
+            <>
+              <circle
+                cx={lx}
+                cy={eyeY}
+                r={intense ? eyeRadius * 1.15 : eyeRadius * 1.02}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.4"
+              />
+              <circle
+                cx={rx}
+                cy={eyeY}
+                r={intense ? eyeRadius * 1.15 : eyeRadius * 1.02}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.4"
+              />
+              <circle cx={lx} cy={eyeY} r={intense ? 1.8 : 2.3} fill="#261E18" />
+              <circle cx={rx} cy={eyeY} r={intense ? 1.8 : 2.3} fill="#261E18" />
+            </>
+          ) : (
+            <>
+              <circle cx={lx - 1} cy={eyeY - 1} r="2.2" fill="#FFFFFF" opacity="0.85" />
+              <circle cx={rx - 1} cy={eyeY - 1} r="2.2" fill="#FFFFFF" opacity="0.85" />
+            </>
+          )}
+
+          {/* Small comic cold-sweat drop on temple at Lv 2+ */}
+          {intense && (
+            <path
+              d={`M${rx + 8.5} ${browY - 3} C${rx + 11.5} ${browY + 1.5} ${rx + 11.5} ${browY + 5} ${rx + 8.5} ${browY + 5} C${rx + 5.5} ${browY + 5} ${rx + 5.5} ${browY + 1.5} ${rx + 8.5} ${browY - 3} Z`}
+              fill="#93C5FD"
+              stroke="#1D4ED8"
+              strokeWidth="1.2"
+            />
+          )}
+
+          {/* Open stunned gasp O-mouth */}
+          <ellipse
+            cx={mx}
+            cy={my + 1}
+            rx={intense ? mouthRx * 0.88 : mouthRx * 0.68}
+            ry={intense ? mouthRy * 1.18 : mouthRy * 0.92}
+            fill="#6B1D1D"
+            stroke="#261E18"
+            strokeWidth="2.7"
+          />
+          <rect
+            x={mx - mouthRx * 0.42}
+            y={my - (intense ? mouthRy * 0.92 : mouthRy * 0.7)}
+            width={mouthRx * 0.84}
+            height="2.6"
+            rx="1.2"
+            fill="#FFFFFF"
+          />
+          {intense && (
+            <ellipse
+              cx={mx}
+              cy={my + mouthRy * 0.72}
+              rx={mouthRx * 0.48}
+              ry="2.6"
+              fill="#E06D7A"
+            />
+          )}
+        </>
+      )}
+
+      {/* ================================================================= */}
+      {/* LEVEL 3: SAD / DISAPPOINTED (3 cards) / HEARTBROKEN (Streak x2)   */}
+      {/* ================================================================= */}
+      {expression === 'sad' && (
+        <>
+          {/* Drooping upturned-inner sad brows */}
+          <path
+            d={`M${lx - 6.5} ${browY + 2} Q${lx} ${browY - 1.5} ${lx + 5.5} ${browY - 4}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.3"
+            strokeLinecap="round"
+          />
+          <path
+            d={`M${rx + 6.5} ${browY + 2} Q${rx} ${browY - 1.5} ${rx - 5.5} ${browY - 4}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.3"
+            strokeLinecap="round"
+          />
+
+          {/* Glossy watery sad eyes + lower-lid teardrops */}
+          {!hasShades ? (
+            <>
+              <ellipse
+                cx={lx}
+                cy={eyeY + 0.5}
+                rx={eyeRadius * 0.95}
+                ry={eyeRadius * 0.88}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.2"
+              />
+              <ellipse
+                cx={rx}
+                cy={eyeY + 0.5}
+                rx={eyeRadius * 0.95}
+                ry={eyeRadius * 0.88}
+                fill="#FFFFFF"
+                stroke="#261E18"
+                strokeWidth="2.2"
+              />
+              <circle cx={lx} cy={eyeY + 1.2} r="2.4" fill="#261E18" />
+              <circle cx={rx} cy={eyeY + 1.2} r="2.4" fill="#261E18" />
+              {/* Glistening tear pool along bottom rim */}
+              <path
+                d={`M${lx - eyeRadius * 0.72} ${eyeY + eyeRadius * 0.42} Q${lx} ${eyeY + eyeRadius * 0.95} ${lx + eyeRadius * 0.72} ${eyeY + eyeRadius * 0.42}`}
+                fill="#93C5FD"
+                opacity="0.92"
+              />
+              <path
+                d={`M${rx - eyeRadius * 0.72} ${eyeY + eyeRadius * 0.42} Q${rx} ${eyeY + eyeRadius * 0.95} ${rx + eyeRadius * 0.72} ${eyeY + eyeRadius * 0.42}`}
+                fill="#93C5FD"
+                opacity="0.92"
+              />
+              <circle cx={lx - 1.2} cy={eyeY - 0.5} r="1.4" fill="#DBEAFE" />
+              <circle cx={rx - 1.2} cy={eyeY - 0.5} r="1.4" fill="#DBEAFE" />
+            </>
+          ) : null}
+
+          {/* Rolling teardrops below eyes / below sunglasses rims */}
+          <path
+            d={`M${lx - 2} ${eyeY + eyeRadius + 0.5} C${lx - 4.5} ${eyeY + eyeRadius + 5.5} ${lx - 4.5} ${eyeY + eyeRadius + 9} ${lx - 1.5} ${eyeY + eyeRadius + 9} C${lx + 1.2} ${eyeY + eyeRadius + 9} ${lx + 1.2} ${eyeY + eyeRadius + 5.5} ${lx - 2} ${eyeY + eyeRadius + 0.5} Z`}
+            fill="#60A5FA"
+            stroke="#1D4ED8"
+            strokeWidth="1.2"
+          />
+          {intense && (
+            <path
+              d={`M${rx + 2} ${eyeY + eyeRadius + 0.5} C${rx + 4.5} ${eyeY + eyeRadius + 5.5} ${rx + 4.5} ${eyeY + eyeRadius + 9.5} ${rx + 1.5} ${eyeY + eyeRadius + 9.5} C${rx - 1.2} ${eyeY + eyeRadius + 9.5} ${rx - 1.2} ${eyeY + eyeRadius + 5.5} ${rx + 2} ${eyeY + eyeRadius + 0.5} Z`}
+              fill="#60A5FA"
+              stroke="#1D4ED8"
+              strokeWidth="1.2"
+            />
+          )}
+
+          {/* Downturned trembling sad frown */}
+          <path
+            d={`M${mx - mouthRx * 0.85} ${my + (intense ? 4.2 : 3)} Q${mx} ${my - (intense ? 5.5 : 3.5)} ${mx + mouthRx * 0.85} ${my + (intense ? 4.2 : 3)}`}
+            fill="none"
+            stroke="#261E18"
+            strokeWidth="3.2"
+            strokeLinecap="round"
+          />
+        </>
+      )}
+
+      {/* ================================================================= */}
+      {/* LEVEL 4+: CRYING / DEVASTATED (4+ cards) & TOTAL MELTDOWN (x3)    */}
+      {/* ================================================================= */}
+      {expression === 'crying' && (
+        <>
+          {/* Deeply anguished eyebrows */}
+          <path
+            d={`M${lx - 7} ${browY + 1.5} Q${lx} ${browY - 2.5} ${lx + 6} ${browY - 5.5}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.6"
+            strokeLinecap="round"
+          />
+          <path
+            d={`M${rx + 7} ${browY + 1.5} Q${rx} ${browY - 2.5} ${rx - 6} ${browY - 5.5}`}
+            fill="none"
+            stroke={browColor}
+            strokeWidth="3.6"
+            strokeLinecap="round"
+          />
+
+          {/* Twin cartoon waterfall tear streams pouring down cheeks */}
+          <path
+            d={
+              intense
+                ? `M${lx - 4} ${eyeY + 3} C${lx - 7} ${eyeY + 16} ${lx - 6.5} ${eyeY + 29} ${lx - 1.5} ${eyeY + 34} C${lx + 3} ${eyeY + 29} ${lx + 4.5} ${eyeY + 16} ${lx + 2.5} ${eyeY + 3} Z`
+                : `M${lx - 3} ${eyeY + 3} C${lx - 5.5} ${eyeY + 13} ${lx - 5} ${eyeY + 22} ${lx - 1} ${eyeY + 25} C${lx + 2.5} ${eyeY + 22} ${lx + 3.5} ${eyeY + 13} ${lx + 2} ${eyeY + 3} Z`
+            }
+            fill="#60A5FA"
+            stroke="#1D4ED8"
+            strokeWidth="1.4"
+            opacity="0.94"
+          />
+          <path
+            d={
+              intense
+                ? `M${rx + 4} ${eyeY + 3} C${rx + 7} ${eyeY + 16} ${rx + 6.5} ${eyeY + 29} ${rx + 1.5} ${eyeY + 34} C${rx - 3} ${eyeY + 29} ${rx - 4.5} ${eyeY + 16} ${rx - 2.5} ${eyeY + 3} Z`
+                : `M${rx + 3} ${eyeY + 3} C${rx + 5.5} ${eyeY + 13} ${rx + 5} ${eyeY + 22} ${rx + 1} ${eyeY + 25} C${rx - 2.5} ${eyeY + 22} ${rx - 3.5} ${eyeY + 13} ${rx - 2} ${eyeY + 3} Z`
+            }
+            fill="#60A5FA"
+            stroke="#1D4ED8"
+            strokeWidth="1.4"
+            opacity="0.94"
+          />
+
+          {/* Tightly squeezed-shut "> <" crying eyes (for non-shades characters) */}
+          {!hasShades && (
+            <>
+              <path
+                d={`M${lx - 5.2} ${eyeY - 3.5} L${lx + 4.2} ${eyeY + 0.2} L${lx - 5.2} ${eyeY + 3.8}`}
+                fill="none"
+                stroke="#261E18"
+                strokeWidth="3.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d={`M${rx + 5.2} ${eyeY - 3.5} L${rx - 4.2} ${eyeY + 0.2} L${rx + 5.2} ${eyeY + 3.8}`}
+                fill="none"
+                stroke="#261E18"
+                strokeWidth="3.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </>
+          )}
+
+          {/* Wide open sobbing / wailing mouth */}
+          <path
+            d={
+              intense
+                ? `M${mx - mouthRx * 1.05} ${my + 4.5} C${mx - mouthRx * 0.8} ${my - 8.5} ${mx + mouthRx * 0.8} ${my - 8.5} ${mx + mouthRx * 1.05} ${my + 4.5} C${mx + mouthRx * 0.6} ${my + 8.5} ${mx - mouthRx * 0.6} ${my + 8.5} ${mx - mouthRx * 1.05} ${my + 4.5} Z`
+                : `M${mx - mouthRx * 0.88} ${my + 3.5} C${mx - mouthRx * 0.65} ${my - 6.5} ${mx + mouthRx * 0.65} ${my - 6.5} ${mx + mouthRx * 0.88} ${my + 3.5} C${mx + mouthRx * 0.5} ${my + 6.5} ${mx - mouthRx * 0.5} ${my + 6.5} ${mx - mouthRx * 0.88} ${my + 3.5} Z`
+            }
+            fill="#6B1D1D"
+            stroke="#261E18"
+            strokeWidth="2.8"
+            strokeLinejoin="round"
+          />
+          <ellipse
+            cx={mx}
+            cy={my + (intense ? 4.2 : 3.2)}
+            rx={intense ? mouthRx * 0.56 : mouthRx * 0.44}
+            ry={intense ? 2.8 : 2.3}
+            fill="#E06D7A"
+          />
+        </>
+      )}
+    </svg>
+  );
+};
 
 /**
  * Illustrated caricature facial expression for human player avatars.
@@ -621,8 +1357,6 @@ export interface PlayerAvatarProps {
   reliefFrame?: ReliefAnimationFrame;
   /** Explicit human avatar persona (defaults deterministically from avatarColor / playerId) */
   humanPersona?: HumanAvatarPersona;
-  /** Existing decorative stage accents (?! sweat drop, dizzy stars) without replacing face swaps */
-  stageEffect?: 'none' | 'shock' | 'dizzy';
   /** Render the expressive cartoon human face even in calm state (used on table & expression demo) */
   showHumanFace?: boolean;
   activeTurn?: boolean;
@@ -633,9 +1367,9 @@ export interface PlayerAvatarProps {
 }
 
 /**
- * Renders the circular avatar for bots and human players with real facial-expression artwork swaps
+ * Renders the circular avatar for bots and human players with real facial-expression updates
  * for both failed-trick penalty levels/streaks AND personalised 4-frame Sigh of Relief animations
- * on successful tricks, while preserving fixed avatar dimensions and existing failed-trick effects.
+ * on successful tricks, while preserving fixed avatar dimensions and clean framing.
  */
 export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   name,
@@ -650,7 +1384,6 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   failStreak = 0,
   reliefFrame = 'idle',
   humanPersona,
-  stageEffect = 'none',
   showHumanFace = false,
   activeTurn = false,
   disconnected = false,
@@ -695,7 +1428,8 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
   let portraitSrc = botProfile ? SHEET_URLS[botProfile.sheet] : '';
   let portraitCol: 0 | 1 = botProfile ? botProfile.col : 0;
   let portraitRow: 0 | 1 = botProfile ? botProfile.row : 0;
-  let artworkMode: 'base' | 'bot-penalty' | 'bot-relief' | 'human-face' = 'base';
+  let artworkMode: 'base' | 'bot-penalty' | 'character-penalty' | 'bot-relief' | 'human-face' =
+    'base';
 
   if (botProfile && isReliefActive && reliefSheetUrl) {
     const rq = RELIEF_QUADRANT[reliefFrame as Exclude<ReliefAnimationFrame, 'idle'>];
@@ -709,44 +1443,48 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
     portraitCol = q.col;
     portraitRow = q.row;
     artworkMode = 'bot-penalty';
+  } else if (botProfile && effectivePenaltyExpr && CHARACTER_FACE_ANCHORS[botProfile.id]) {
+    artworkMode = 'character-penalty';
   }
 
-  const showShockBurst = !isReliefActive && stageEffect === 'shock';
-  const showDizzyStars = !isReliefActive && (stageEffect === 'dizzy' || expression === 'dizzy');
+  const useCharacterPenaltyOverlay = artworkMode === 'character-penalty' && Boolean(effectivePenaltyExpr);
+
+  // Subtle portrait mood grading for character-penalty portraits so expression shifts read instantly at all sizes
+  const portraitMoodFilter = useCharacterPenaltyOverlay
+    ? effectivePenaltyExpr === 'crying'
+      ? expressionIntensity >= 2
+        ? 'saturate(0.84) contrast(1.06) brightness(0.94)'
+        : 'saturate(0.88) brightness(0.96)'
+      : effectivePenaltyExpr === 'sad'
+        ? 'saturate(0.82) brightness(0.95)'
+        : effectivePenaltyExpr === 'annoyed' && expressionIntensity >= 2
+          ? 'saturate(1.16) contrast(1.06)'
+          : undefined
+    : undefined;
 
   const reliefMotionStyle: ReliefMotionStyle = botProfile
     ? getBotReliefMotionStyle(botProfile.id)
     : HUMAN_PERSONA_META[resolvedPersona].motion;
 
+  // Clean, non-conflicting frame border so the actual facial expression remains the visual focus
   const ringClass = isReliefActive
-    ? 'ring-2 ring-[#6EE7B7] shadow-[0_0_16px_rgba(110,231,183,0.58)]'
-    : expression === 'crying'
-      ? expressionIntensity >= 2
-        ? 'ring-2 ring-[#EF4444] shadow-[0_0_20px_rgba(239,68,68,0.85)]'
-        : 'ring-2 ring-[#60A5FA] shadow-[0_0_16px_rgba(96,165,250,0.72)]'
-      : expression === 'sad'
-        ? 'ring-2 ring-[#93C5FD] shadow-[0_0_14px_rgba(147,197,253,0.62)]'
-        : expression === 'shocked'
-          ? 'ring-2 ring-[#F87171] shadow-[0_0_18px_rgba(248,113,113,0.78)]'
-          : expression === 'annoyed'
-            ? expressionIntensity >= 2
-              ? 'ring-2 ring-[#F97316] shadow-[0_0_16px_rgba(249,115,22,0.75)]'
-              : 'ring-2 ring-[#FBBF24] shadow-[0_0_12px_rgba(251,191,36,0.58)]'
-            : expression === 'dizzy'
-              ? 'ring-2 ring-[#FBBF24] shadow-[0_0_16px_rgba(251,191,36,0.7)]'
-              : expression === 'donkey'
-                ? 'ring-2 ring-[#F5C954] shadow-[0_8px_20px_rgba(0,0,0,0.45)]'
-                : activeTurn
-                  ? 'ring-2 ring-[#F5C954] shadow-[0_0_14px_rgba(245,201,84,0.62)]'
-                  : 'ring-2 ring-white/25 shadow-xs';
+    ? 'ring-2 ring-[#6EE7B7]/85 shadow-[0_0_12px_rgba(110,231,183,0.45)]'
+    : expression === 'donkey'
+      ? 'ring-2 ring-[#F5C954] shadow-[0_8px_20px_rgba(0,0,0,0.45)]'
+      : activeTurn
+        ? 'ring-2 ring-[#F5C954] shadow-[0_0_14px_rgba(245,201,84,0.62)]'
+        : effectivePenaltyExpr && expressionIntensity >= 2
+          ? 'ring-2 ring-[#F87171]/60 shadow-xs'
+          : 'ring-2 ring-white/25 shadow-xs';
 
   const motionAnimClass = !animated
     ? ''
     : isReliefActive
       ? RELIEF_MOTION_CLASS[reliefMotionStyle]
-      : showShockBurst || expression === 'shocked'
+      : effectivePenaltyExpr === 'shocked' ||
+          (effectivePenaltyExpr === 'annoyed' && expressionIntensity >= 2)
         ? 'avatar-shock-bounce'
-        : showDizzyStars || (expression === 'crying' && expressionIntensity >= 2)
+        : effectivePenaltyExpr === 'crying' && expressionIntensity >= 2
           ? 'avatar-dizzy-wobble'
           : '';
 
@@ -763,6 +1501,7 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
       data-avatar-id={botProfile?.id}
       data-bot-avatar-id={botProfile?.id}
       data-avatar-expression={isReliefActive ? `relief-${reliefFrame}` : expression}
+      data-penalty-expression={isReliefActive ? 'none' : effectivePenaltyExpr ?? 'none'}
       data-relief-frame={isReliefActive ? reliefFrame : 'idle'}
       data-expression-intensity={expressionIntensity}
       data-fail-streak={failStreak}
@@ -805,21 +1544,31 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
         title={botProfile ? `${botProfile.name} — ${botProfile.personality}` : name}
       >
         {botProfile ? (
-          <img
-            src={portraitSrc}
-            alt={
-              isReliefActive
-                ? `${botProfile.name} sigh of relief (${reliefFrame})`
-                : `${botProfile.name} (${expression})`
-            }
-            referrerPolicy="no-referrer"
-            draggable={false}
-            className="pointer-events-none absolute max-w-none w-[204%] h-[204%]"
-            style={{
-              left: portraitCol === 0 ? '-1%' : '-103%',
-              top: portraitRow === 0 ? '-1%' : '-103%',
-            }}
-          />
+          <>
+            <img
+              src={portraitSrc}
+              alt={
+                isReliefActive
+                  ? `${botProfile.name} sigh of relief (${reliefFrame})`
+                  : `${botProfile.name} (${expression})`
+              }
+              referrerPolicy="no-referrer"
+              draggable={false}
+              className="pointer-events-none absolute max-w-none w-[204%] h-[204%]"
+              style={{
+                left: portraitCol === 0 ? '-1%' : '-103%',
+                top: portraitRow === 0 ? '-1%' : '-103%',
+                ...(portraitMoodFilter ? { filter: portraitMoodFilter } : {}),
+              }}
+            />
+            {useCharacterPenaltyOverlay && effectivePenaltyExpr && (
+              <CharacterPenaltyFaceOverlay
+                characterId={botProfile.id}
+                expression={effectivePenaltyExpr}
+                intensity={useIntenseSheet ? (Math.max(2, expressionIntensity) as ExpressionIntensity) : expressionIntensity}
+              />
+            )}
+          </>
         ) : renderHumanFace ? (
           <HumanExpressionFace
             expression={expression}
@@ -835,82 +1584,7 @@ export const PlayerAvatar: React.FC<PlayerAvatarProps> = ({
             {name.trim().slice(0, 1).toUpperCase() || 'P'}
           </span>
         )}
-
-        {/* Subtle Rim Glow Tint on Active Failed-Trick Stage */}
-        {showShockBurst && (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 rounded-full ring-inset ring-2 ring-[#FCA5A5]/80"
-          />
-        )}
-
-        {showDizzyStars && (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 rounded-full ring-inset ring-2 ring-[#FDE68A]/80"
-          />
-        )}
       </div>
-
-      {/* Preserved Stage 2 Comic Shocked Burst ("?!") + Sweat Drop */}
-      {showShockBurst && (
-        <>
-          <motion.span
-            aria-hidden="true"
-            initial={animated ? { scale: 0.2, opacity: 0, rotate: -18 } : false}
-            animate={{ scale: 1, opacity: 1, rotate: -8 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="pointer-events-none absolute -top-2 -right-2 z-30 rounded-full bg-[#DC2626] border border-[#FEF2F2] text-white font-display font-black text-[10px] leading-none px-1.5 py-0.5 shadow-md"
-          >
-            ?!
-          </motion.span>
-          <svg
-            viewBox="0 0 18 24"
-            aria-hidden="true"
-            className="pointer-events-none absolute -top-1 -left-1.5 z-30 w-3.5 h-4 drop-shadow-xs"
-          >
-            <path
-              d="M9 2 C9 2 16 11 16 15.5 C16 19.6 12.9 22 9 22 C5.1 22 2 19.6 2 15.5 C2 11 9 2 9 2 Z"
-              fill="#60A5FA"
-              stroke="#1E3A8A"
-              strokeWidth="1.8"
-            />
-            <circle cx="6.5" cy="14.5" r="1.6" fill="#DBEAFE" />
-          </svg>
-        </>
-      )}
-
-      {/* Preserved Stage 4 Comic Dizzy Stars */}
-      {showDizzyStars && (
-        <motion.div
-          aria-hidden="true"
-          initial={animated ? { scale: 0.5, opacity: 0, y: 2 } : false}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
-          transition={{ duration: 0.2 }}
-          className="pointer-events-none absolute -top-2.5 inset-x-0 flex items-center justify-center gap-0.5 z-30"
-        >
-          <svg viewBox="0 0 44 16" className="w-10 h-4 drop-shadow-xs">
-            <polygon
-              points="7,1 8.8,5.2 13.4,5.6 9.9,8.5 11,13 7,10.5 3,13 4.1,8.5 0.6,5.6 5.2,5.2"
-              fill="#FDE047"
-              stroke="#92400E"
-              strokeWidth="1.2"
-            />
-            <polygon
-              points="22,0.5 23.6,4.2 27.6,4.5 24.5,7 25.5,11 22,8.8 18.5,11 19.5,7 16.4,4.5 20.4,4.2"
-              fill="#FBBF24"
-              stroke="#92400E"
-              strokeWidth="1.1"
-            />
-            <polygon
-              points="37,1.5 38.6,5.4 42.8,5.8 39.6,8.4 40.6,12.5 37,10.2 33.4,12.5 34.4,8.4 31.2,5.8 35.4,5.4"
-              fill="#FDE047"
-              stroke="#92400E"
-              strokeWidth="1.2"
-            />
-          </svg>
-        </motion.div>
-      )}
 
       {/* Happy Sparkle Accent */}
       {expression === 'happy' && (

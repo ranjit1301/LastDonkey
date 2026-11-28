@@ -765,22 +765,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
     return CALM_FACIAL_STATE;
   };
 
-  const getPlayerStageEffect = (playerId: string): 'none' | 'shock' | 'dizzy' => {
-    if (
-      animationsActive &&
-      failedOutcome &&
-      failedOutcome.collectorId === playerId
-    ) {
-      if (failedAnimStage === 'reaction' || failedAnimStage === 'flying') {
-        return 'shock';
-      }
-      if (failedAnimStage === 'finishing') {
-        return 'dizzy';
-      }
-    }
-    return 'none';
-  };
-
   const getPlayerReliefFrame = (player: UnifiedPlayer): ReliefAnimationFrame => {
     if (!animationsActive || player.finished || player.removed) {
       return 'idle';
@@ -1002,7 +986,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                 (tp) => tp.playerId === opp.id
               );
               const facialState = getPlayerFacialState(opp);
-              const stageEffect = getPlayerStageEffect(opp.id);
               const penaltyDelta = getPlayerPenaltyDelta(opp.id);
               const isPenalizedHighlight =
                 animationsActive &&
@@ -1045,7 +1028,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                     expressionIntensity={facialState.intensity}
                     failStreak={facialState.consecutiveFailStreak}
                     reliefFrame={getPlayerReliefFrame(opp)}
-                    stageEffect={stageEffect}
                     showHumanFace
                     activeTurn={isTurn}
                     disconnected={!opp.connected && opp.type === 'human'}
@@ -1381,7 +1363,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                   {/* Local player avatar showing real facial expressions & consecutive-failure streaks */}
                   {(() => {
                     const localFacial = getPlayerFacialState(perspectivePlayer);
-                    const localStageEffect = getPlayerStageEffect(perspectivePlayer.id);
                     return (
                       <PlayerAvatar
                         name={perspectivePlayer.name}
@@ -1395,7 +1376,6 @@ export const CardTableScreen: React.FC<CardTableScreenProps> = ({
                         expressionIntensity={localFacial.intensity}
                         failStreak={localFacial.consecutiveFailStreak}
                         reliefFrame={getPlayerReliefFrame(perspectivePlayer)}
-                        stageEffect={localStageEffect}
                         showHumanFace
                         activeTurn={turnState.canActNow}
                         penaltyDelta={getPlayerPenaltyDelta(perspectivePlayer.id)}
